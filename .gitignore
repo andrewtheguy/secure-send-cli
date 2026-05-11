@@ -3,3 +3,4 @@ wormhole_*
 .idea/
 build/
 tmp/
+.claude/
