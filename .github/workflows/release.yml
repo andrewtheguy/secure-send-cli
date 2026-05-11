@@ -2,10 +2,6 @@ name: Release (Manual)
 
 on:
   workflow_dispatch:
-    inputs:
-      tag_name:
-        description: 'Tag name (leave empty for auto-generated yyyymmddhhmmss)'
-        required: false
 
 permissions:
   contents: write
@@ -14,19 +10,47 @@ jobs:
   setup:
     runs-on: ubuntu-latest
     outputs:
-      release_tag: ${{ steps.tag.outputs.release_tag }}
-      is_prerelease: ${{ steps.tag.outputs.is_prerelease }}
+      release_tag: ${{ steps.version.outputs.new }}
+      is_prerelease: ${{ steps.version.outputs.prerelease }}
     steps:
-      - name: Generate Tag
-        id: tag
+      - uses: actions/checkout@v4
+
+      - name: Determine version
+        id: version
         run: |
-          if [ -z "${{ inputs.tag_name }}" ]; then
-            echo "release_tag=$(date +'%Y%m%d%H%M%S')" >> $GITHUB_OUTPUT
-            echo "is_prerelease=true" >> $GITHUB_OUTPUT
+          version=$(python3 -c "import tomllib, pathlib; print(tomllib.loads(pathlib.Path('Cargo.toml').read_text())['workspace']['package']['version'])")
+          echo "new=$version" >> "$GITHUB_OUTPUT"
+          if [ "${{ github.ref }}" != "refs/heads/main" ]; then
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
           else
-            echo "release_tag=${{ inputs.tag_name }}" >> $GITHUB_OUTPUT
-            echo "is_prerelease=false" >> $GITHUB_OUTPUT
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
           fi
+
+      - name: Abort if tag already exists
+        run: |
+          if git ls-remote --tags origin "refs/tags/${{ steps.version.outputs.new }}" | grep -q .; then
+            echo "::error::Tag ${{ steps.version.outputs.new }} already exists on remote"
+            exit 1
+          fi
+
+      - name: Create draft release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          # Clean up any leftover draft from a previous failed run with the same version.
+          # A draft release doesn't create the git tag on the remote, so a stale draft is the
+          # only thing that can collide here (real published tags are caught by the step above).
+          if gh release view "${{ steps.version.outputs.new }}" --json isDraft --jq '.isDraft' 2>/dev/null | grep -qx true; then
+            echo "Deleting stale draft release ${{ steps.version.outputs.new }}"
+            gh release delete "${{ steps.version.outputs.new }}" --yes
+          fi
+          gh release create "${{ steps.version.outputs.new }}" \
+            --draft \
+            --target "${{ github.sha }}" \
+            --title "Release ${{ steps.version.outputs.new }}" \
+            --generate-notes \
+            ${{ steps.version.outputs.prerelease == 'true' && '--prerelease' || '' }}
 
   build-linux:
     needs: setup
@@ -214,13 +238,14 @@ jobs:
       - name: List artifacts
         run: ls -la artifacts/
 
-      - name: Create Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ needs.setup.outputs.release_tag }}
-          name: Release ${{ needs.setup.outputs.release_tag }}
-          prerelease: ${{ needs.setup.outputs.is_prerelease }}
-          generate_release_notes: true
-          files: artifacts/*
+      - name: Upload artifacts to draft release
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: gh release upload "${{ needs.setup.outputs.release_tag }}" artifacts/* --clobber
+
+      - name: Publish release (remove draft, creates the tag)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: gh release edit "${{ needs.setup.outputs.release_tag }}" --draft=false
