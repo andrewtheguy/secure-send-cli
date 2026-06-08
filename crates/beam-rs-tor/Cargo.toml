@@ -1,0 +1,34 @@
+[package]
+name = "beam-rs-tor"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[[bin]]
+name = "beam-rs-tor"
+path = "src/main.rs"
+
+[dependencies]
+# Common library
+beam-common = { path = "../beam-common" }
+
+# Core dependencies (workspace)
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+anyhow = { workspace = true }
+clap = { workspace = true }
+rand = { workspace = true }
+hex = { workspace = true }
+futures = { workspace = true }
+log = { workspace = true }
+tempfile = { workspace = true }
+
+# Crate-specific dependencies
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Tor/Onion transport
+arti-client = { version = "0.37", features = ["onion-service-service", "onion-service-client", "tokio"] }
+tor-hsservice = "0.37"
+tor-cell = "0.37"
+safelog = "0.7.1"
+rusqlite = { version = "0.37", features = ["bundled"] }

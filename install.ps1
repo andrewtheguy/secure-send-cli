@@ -1,10 +1,10 @@
 #!/usr/bin/env pwsh
 
-# Wormhole-rs installer for Windows
-# Downloads latest binary from: https://github.com/andrewtheguy/wormhole-rs/releases
+# Beam-rs installer for Windows
+# Downloads latest binary from: https://github.com/andrewtheguy/beam-rs/releases
 #
 # Invocation is now argument-parsed only (compat-breaking): flags are read from
-# $args or $env:WORMHOLE_INSTALL_ARGS. Param binding is removed.
+# $args or $env:BEAM_INSTALL_ARGS. Param binding is removed.
 
 # Defaults (will be overwritten by fallback arg parser)
 $ReleaseTag   = $null
@@ -16,12 +16,12 @@ $WebRTC       = $false
 $ErrorActionPreference = "Stop"
 
 $REPO_OWNER = "andrewtheguy"
-$REPO_NAME = "wormhole-rs"
+$REPO_NAME = "beam-rs"
 
 # Allow passing flags when the script is piped into Invoke-Expression (iex) where
 # normal PowerShell parameter binding is unavailable. Users can set
-# $env:WORMHOLE_INSTALL_ARGS to a PowerShell-style argument string, e.g.:
-#   $env:WORMHOLE_INSTALL_ARGS='-WebRTC'; irm https://andrewtheguy.github.io/wormhole-rs/install.ps1 | iex
+# $env:BEAM_INSTALL_ARGS to a PowerShell-style argument string, e.g.:
+#   $env:BEAM_INSTALL_ARGS='-WebRTC'; irm https://andrewtheguy.github.io/beam-rs/install.ps1 | iex
 # This keeps the single-line install experience while still supporting flags.
 
 # Function to print colored messages
@@ -191,16 +191,16 @@ function Get-BinaryName {
     }
 
     if ($WebRTC) {
-        return "wormhole-rs-webrtc-windows-amd64.exe"
+        return "beam-rs-webrtc-windows-amd64.exe"
     }
-    return "wormhole-rs-windows-amd64.exe"
+    return "beam-rs-windows-amd64.exe"
 }
 
 function Get-InstallName {
     if ($WebRTC) {
-        return "wormhole-rs-webrtc.exe"
+        return "beam-rs-webrtc.exe"
     }
-    return "wormhole-rs.exe"
+    return "beam-rs.exe"
 }
 
 # Parse argument strings (e.g., from environment variables) using PowerShell's tokenizer
@@ -215,7 +215,7 @@ function Parse-ArgString {
     $tokens = [System.Management.Automation.PSParser]::Tokenize($ArgString, [ref]$errors)
 
     if ($errors -and $errors.Count -gt 0) {
-        Print-Warn "Could not parse WORMHOLE_INSTALL_ARGS: $($errors[0].Message)"
+        Print-Warn "Could not parse BEAM_INSTALL_ARGS: $($errors[0].Message)"
         return @()
     }
 
@@ -341,9 +341,9 @@ function Install-Binary {
     )
 
     $url = "$BaseUrl/$BinaryName"
-    $tempDir = Join-Path $env:TEMP "wormhole-rs-install-$(Get-Random)"
+    $tempDir = Join-Path $env:TEMP "beam-rs-install-$(Get-Random)"
     $tempBinary = Join-Path $tempDir $BinaryName
-    $installDir = Join-Path $env:LOCALAPPDATA "Programs\wormhole-rs"
+    $installDir = Join-Path $env:LOCALAPPDATA "Programs\beam-rs"
     $installName = Get-InstallName
     $finalPath = Join-Path $installDir $installName
 
@@ -417,12 +417,12 @@ function Show-Usage {
     Write-Host @"
 Usage: .\install.ps1 [OPTIONS] [RELEASE_TAG]
 
-Download and install wormhole-rs binary
+Download and install beam-rs binary
 
 Options:
   -DownloadOnly  Download binary to current directory without installing
   -PreRelease    Use latest prerelease instead of latest stable release
-  -WebRTC        Install wormhole-rs-webrtc binary instead of wormhole-rs
+  -WebRTC        Install beam-rs-webrtc binary instead of beam-rs
   -Admin         Allow installation with administrator privileges (not recommended)
   -h, --help     Show this help message
 
@@ -431,18 +431,18 @@ Arguments:
 
 Environment variables:
   `$env:RELEASE_TAG    Alternative way to specify release tag
-    `$env:WORMHOLE_INSTALL_ARGS  Fallback flags for iex one-liners (e.g. "-WebRTC")
+    `$env:BEAM_INSTALL_ARGS  Fallback flags for iex one-liners (e.g. "-WebRTC")
 
 Examples:
-    .\install.ps1                              # Install latest wormhole-rs (args-only parser)
-    .\install.ps1 -WebRTC                      # Install wormhole-rs-webrtc (args-only parser)
+    .\install.ps1                              # Install latest beam-rs (args-only parser)
+    .\install.ps1 -WebRTC                      # Install beam-rs-webrtc (args-only parser)
     .\install.ps1 20251210172710               # Install specific release
     .\install.ps1 -PreRelease                  # Install latest prerelease
     .\install.ps1 -DownloadOnly                # Download latest to current directory
     .\install.ps1 -DownloadOnly 20251210172710 # Download specific release
     .\install.ps1 -Admin                       # Allow admin installation (not recommended)
     `$env:RELEASE_TAG='latest'; .\install.ps1  # Use environment variable
-    `$env:WORMHOLE_INSTALL_ARGS='-WebRTC'; irm https://andrewtheguy.github.io/wormhole-rs/install.ps1 | iex
+    `$env:BEAM_INSTALL_ARGS='-WebRTC'; irm https://andrewtheguy.github.io/beam-rs/install.ps1 | iex
 
 Supported platforms: Windows (amd64)
 
@@ -483,10 +483,10 @@ function Start-Installation {
     )
 
     if ($DownloadOnly) {
-        Print-Info "Wormhole-rs downloader"
+        Print-Info "Beam-rs downloader"
     }
     else {
-        Print-Info "Wormhole-rs installer"
+        Print-Info "Beam-rs installer"
     }
     Print-Info "Release: $Tag"
     Print-Info "Repository: $REPO_OWNER/$REPO_NAME"
@@ -535,13 +535,13 @@ function Main {
         if ($args -and $args.Count -gt 0) {
             $fallbackArgs += $args
         }
-        if ($env:WORMHOLE_INSTALL_ARGS) {
-            $fallbackArgs += (Parse-ArgString -ArgString $env:WORMHOLE_INSTALL_ARGS)
+        if ($env:BEAM_INSTALL_ARGS) {
+            $fallbackArgs += (Parse-ArgString -ArgString $env:BEAM_INSTALL_ARGS)
         }
         Apply-FallbackArgs -ArgList $fallbackArgs
 
         # Extra guard: honor env flags even if tokenization failed
-        $envArgs = $env:WORMHOLE_INSTALL_ARGS
+        $envArgs = $env:BEAM_INSTALL_ARGS
         if ($envArgs) {
             if (-not $WebRTC -and $envArgs -match '(?i)(^|\s)--?webrtc(\s|$)') { $WebRTC = $true }
             if (-not $PreRelease -and $envArgs -match '(?i)(^|\s)--?prerelease(\s|$)') { $PreRelease = $true }
@@ -560,10 +560,10 @@ function Main {
     }
 
     if ($DownloadOnly) {
-        Print-Info "Starting Wormhole-rs download..."
+        Print-Info "Starting Beam-rs download..."
     }
     else {
-        Print-Info "Starting Wormhole-rs installation..."
+        Print-Info "Starting Beam-rs installation..."
     }
 
     # Determine release tag
@@ -595,7 +595,7 @@ try {
 }
 finally {
     # Clean up the fallback args variable to avoid persistence across sessions
-    if (Test-Path env:WORMHOLE_INSTALL_ARGS) {
-        Remove-Item env:WORMHOLE_INSTALL_ARGS -ErrorAction SilentlyContinue
+    if (Test-Path env:BEAM_INSTALL_ARGS) {
+        Remove-Item env:BEAM_INSTALL_ARGS -ErrorAction SilentlyContinue
     }
 }

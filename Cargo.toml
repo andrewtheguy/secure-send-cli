@@ -1,15 +1,15 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/wormhole-common",
-    "crates/wormhole-rs",
-    "crates/wormhole-rs-local",
-    "crates/wormhole-rs-tor",
-    "crates/wormhole-rs-webrtc",
+    "crates/beam-common",
+    "crates/beam-rs",
+    "crates/beam-rs-local",
+    "crates/beam-rs-tor",
+    "crates/beam-rs-webrtc",
 ]
 
 [workspace.package]
-version = "0.0.2"
+version = "0.0.3"
 edition = "2024"
 
 [workspace.dependencies]

@@ -1,21 +1,21 @@
-# Wormhole-rs Architecture
+# Beam-rs Architecture
 
 ## Overview
 
-This document provides a detailed walkthrough of the wormhole-rs implementation.
+This document provides a detailed walkthrough of the beam-rs implementation.
 
-wormhole-rs supports two main categories of transport:
+beam-rs supports two main categories of transport:
 
-1. **Internet Transfers** (wormhole code based):
-    - **iroh Mode** (Recommended) - Direct P2P transfers using iroh's QUIC/TLS stack (automatic relay fallback) via `wormhole-rs send`
-    - **Tor Mode**: Anonymous transfers via Tor hidden services (uses `arti`) via `wormhole-rs-tor send`
-    - **WebRTC Mode**: Direct P2P via WebRTC DataChannels with Nostr signaling via `wormhole-rs-webrtc send`
-2. **Local Transfers** (using `wormhole-rs-local send`):
+1. **Internet Transfers** (beam code based):
+    - **iroh Mode** (Recommended) - Direct P2P transfers using iroh's QUIC/TLS stack (automatic relay fallback) via `beam-rs send`
+    - **Tor Mode**: Anonymous transfers via Tor hidden services (uses `arti`) via `beam-rs-tor send`
+    - **WebRTC Mode**: Direct P2P via WebRTC DataChannels with Nostr signaling via `beam-rs-webrtc send`
+2. **Local Transfers** (using `beam-rs-local send`):
     - **mDNS Mode**: LAN-only transfers using mDNS discovery + TCP with SPAKE2 key exchange driven by a 12-character PIN
 
 ## Transfer Flows
 
-### 1. Internet Transfers (Wormhole Code)
+### 1. Internet Transfers (Beam Code)
 
 #### iroh Mode (Recommended) - QUIC / Direct + Relay
 
@@ -30,7 +30,7 @@ sequenceDiagram
     Sender->>Sender: 1. Create iroh Node (Random NodeID)
     Sender->>Relay: 2. Connect to Home Relay
 
-    Sender->>Sender: 3. Generate wormhole code
+    Sender->>Sender: 3. Generate beam code
     Note over Sender: Code = base64url(JSON token: version, protocol, created_at, AES_key, minimal addr)
     Note over Sender: Minimal addr = NodeID + relay URL
 
@@ -44,7 +44,7 @@ sequenceDiagram
 
     Note over Sender,Receiver: iroh selects best path (Direct > Relay)
 
-    Sender->>Receiver: 6. Handshake (ALPN "wormhole-transfer/1")
+    Sender->>Receiver: 6. Handshake (ALPN "beam-transfer/1")
     Sender->>Receiver: 7. Send Encrypted Header (AES-256-GCM)
     Note over Receiver: Check file existence, prompt user
 
@@ -72,7 +72,7 @@ sequenceDiagram
 
     Sender->>Sender: 1. Bootstrap Tor client (ephemeral)
     Sender->>Tor: 2. Create .onion hidden service
-    Sender->>Sender: 3. Generate wormhole code
+    Sender->>Sender: 3. Generate beam code
     Note over Sender: Code = base64url(JSON token: version, protocol, created_at, AES_key, onion_addr)
 
     Receiver->>Receiver: 4. Bootstrap Tor client
@@ -113,12 +113,12 @@ sequenceDiagram
     Sender->>Nostr: 3. Connect & Subscribe
     Sender->>Nostr: 4. Publish Offer (SDP)
 
-    Note over Sender: Display wormhole code (transfer-id, pubkey, relays, AES key)
+    Note over Sender: Display beam code (transfer-id, pubkey, relays, AES key)
     Note over Sender: Gathering ICE candidates...
 
     Sender-->>Nostr: (async) Publish ICE candidates as gathered
 
-    Receiver->>Nostr: 5. Connect & Subscribe (using wormhole code)
+    Receiver->>Nostr: 5. Connect & Subscribe (using beam code)
     Nostr->>Receiver: 6. Receive Offer (SDP)
     Nostr-->>Receiver: (async) Receive Sender's ICE candidates
 
@@ -134,7 +134,7 @@ sequenceDiagram
 
     Note over Sender,Receiver: ICE connectivity checks, WebRTC connection established
 
-    Note over Sender,Receiver: Shared AES-256-GCM key is embedded in the wormhole code
+    Note over Sender,Receiver: Shared AES-256-GCM key is embedded in the beam code
     Sender->>Receiver: 11. Send Encrypted Header (AES-256-GCM)
     alt User accepts transfer
         Receiver->>Sender: 12. Send Encrypted PROCEED
@@ -164,7 +164,7 @@ sequenceDiagram
     Sender->>Sender: 1. Generate 12-char PIN (with checksum)
     Sender->>Sender: 2. Start TCP Listener (Random Port)
     
-    Sender->>mDNS: 3. Advertise Service (_wormhole._tcp)
+    Sender->>mDNS: 3. Advertise Service (_beam._tcp)
     Note over mDNS: TXT: transfer_id, filename, size, type
 
     Note over Sender: User shares PIN out-of-band
@@ -193,33 +193,33 @@ sequenceDiagram
 
 ## Connection Types/Modes
 
-### iroh Mode (`wormhole-rs send`) - Recommended
+### iroh Mode (`beam-rs send`) - Recommended
 - **Transport**: QUIC / TLS 1.3
-- **Discovery**: Relay URL embedded in wormhole code + mDNS for local network.
+- **Discovery**: Relay URL embedded in beam code + mDNS for local network.
 - **Relay**: iroh relays (DERP) - automatically used if direct P2P connection fails.
 - **Failover**: Uses multiple relays for redundancy; monitors latency to select the best path.
 - **Connection**: "Hole punching" attempts to establish a direct UDP connection; falls back to relay if NATs are strict.
-- **Protocol**: ALPN `wormhole-transfer/1`.
+- **Protocol**: ALPN `beam-transfer/1`.
 - **Encryption**: Always AES-256-GCM encrypted at the application layer, plus QUIC/TLS encryption.
 
-### Local Mode (`wormhole-rs-local send`)
+### Local Mode (`beam-rs-local send`)
 - **Transport**: Raw TCP
 - **Discovery**: mDNS (Multicast DNS)
 - **Key Exchange**: SPAKE2 using a 12-character PIN + transfer_id (prevents offline dictionary attacks)
 - **Encryption**: Mandatory AES-256-GCM using SPAKE2-derived key
 - **Port**: Random ephemeral port
 
-### Tor Mode (`wormhole-rs-tor send`)
+### Tor Mode (`beam-rs-tor send`)
 - **Transport**: Tor Onion Services
 - **Discovery**: Onion Address
 - **Encryption**: Tor circuit encryption plus mandatory AES-256-GCM at the application layer.
 
-### WebRTC Mode (`wormhole-rs-webrtc send`)
+### WebRTC Mode (`beam-rs-webrtc send`)
 - **Transport**: WebRTC DataChannel over DTLS
 - **Discovery**: Nostr relays for SDP/ICE signaling (or manual copy-paste)
 - **NAT Traversal**: ICE with multiple public STUN servers (Google + Cloudflare)
 - **Encryption**: DTLS (WebRTC built-in) + AES-256-GCM at application layer
-- **Fallback**: Try iroh mode (with automatic relay) if direct P2P fails. Use `wormhole-rs-tor` for anonymity
+- **Fallback**: Try iroh mode (with automatic relay) if direct P2P fails. Use `beam-rs-tor` for anonymity
 
 ## Security Model
 
@@ -228,11 +228,11 @@ iroh mode uses two encryption layers for defense in depth:
 
 **Transport Layer (iroh/QUIC)**:
 - TLS 1.3/QUIC encryption (cipher negotiated by iroh/quinn)
-- Mutual authentication via iroh node identities (NodeID in wormhole code)
+- Mutual authentication via iroh node identities (NodeID in beam code)
 
-**Application Layer (wormhole-rs)**:
+**Application Layer (beam-rs)**:
 - AES-256-GCM encryption for all data: headers, chunks, and control signals
-- 256-bit key generated per transfer, embedded in wormhole code
+- 256-bit key generated per transfer, embedded in beam code
 
 ### WebRTC Mode Encryption (Dual Layer)
 WebRTC mode uses two encryption layers for defense in depth:
@@ -241,9 +241,9 @@ WebRTC mode uses two encryption layers for defense in depth:
 - DTLS encryption for all data channel traffic
 - ICE consent for periodic connectivity verification
 
-**Application Layer (wormhole-rs)**:
+**Application Layer (beam-rs)**:
 - AES-256-GCM encryption for all data: headers, chunks, and control signals
-- Per-transfer random key embedded in the wormhole code
+- Per-transfer random key embedded in the beam code
 
 ### PIN-based Key Exchange (Local Mode)
 - **Format**: 12 characters (11 random + 1 checksum) from an unambiguous charset; the checksum catches typos before attempting a connection.
@@ -260,7 +260,7 @@ WebRTC mode uses two encryption layers for defense in depth:
 
 ### TTL (Time-To-Live) Validation
 
-All wormhole codes and signaling offers include a creation timestamp and are validated against a TTL to prevent replay attacks and stale session establishment.
+All beam codes and signaling offers include a creation timestamp and are validated against a TTL to prevent replay attacks and stale session establishment.
 
 **Implementation:**
 - **Token Version**: v4 tokens include a `created_at` Unix timestamp
@@ -268,7 +268,7 @@ All wormhole codes and signaling offers include a creation timestamp and are val
 - **Clock Skew**: Allows up to 60 seconds into the future to handle minor clock drift
 
 **Validation Points:**
-1. **Wormhole Codes** (iroh/tor/webrtc via Nostr): Validated in `parse_code()` before connection
+1. **Beam Codes** (iroh/tor/webrtc via Nostr): Validated in `parse_code()` before connection
 2. **Manual Signaling Offers** (`send-manual`/`receive-manual` WebRTC): Validated in `read_offer_json()` before WebRTC handshake
 
 **Not used for mDNS (Local Mode):**
@@ -310,7 +310,7 @@ These signals are not tied to chunk numbers and use fresh random nonces like all
 Resumable state is only used for **file** transfers (not folders) when resume is enabled.
 
 - Receiver writes incoming bytes to a resume temp file in the target directory:
-  `<final_path>.wormhole-rs.partial`
+  `<final_path>.beam-rs.partial`
 - That temp file contains a fixed-size metadata header (checksum, expected size,
   bytes received, filename) followed by file data.
 
@@ -320,7 +320,7 @@ When the transfer completes successfully:
    `<final_path>.partial` in the same directory.
 2. Receiver syncs the staging file and parent directory.
 3. Receiver atomically renames staging to the final destination path.
-4. Receiver removes `<final_path>.wormhole-rs.partial`.
+4. Receiver removes `<final_path>.beam-rs.partial`.
 
 Keeping both temp/staging files in the same directory ensures the final rename
 is on the same filesystem, which enables atomic replacement semantics.
@@ -334,7 +334,7 @@ WebRTC uses the same length-prefixed encrypted framing as stream transports. The
 ### Nonce Derivation
 
 AES-256-GCM requires a unique 12-byte nonce for each encryption operation with
-the same key. wormhole-rs generates a fresh random 96-bit nonce per message and
+the same key. beam-rs generates a fresh random 96-bit nonce per message and
 prefixes it to the ciphertext, so the receiver can decrypt directly. With 16KB
 chunks and a per-transfer key, the conservative 2^32 random-nonce limit
 corresponds to ~64 TiB per transfer.

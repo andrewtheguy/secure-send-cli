@@ -76,40 +76,40 @@ jobs:
         run: cargo build --release --all-features --target ${{ matrix.target }}
 
       - name: Rename Binary
-        run: mv target/${{ matrix.target }}/release/wormhole-rs target/release/wormhole-rs-${{ matrix.suffix }}
+        run: mv target/${{ matrix.target }}/release/beam-rs target/release/beam-rs-${{ matrix.suffix }}
 
       - name: Upload release artifact
         uses: actions/upload-artifact@v4
         with:
           name: release-${{ matrix.suffix }}
-          path: target/release/wormhole-rs-${{ matrix.suffix }}
+          path: target/release/beam-rs-${{ matrix.suffix }}
 
       - name: Rename WebRTC Binary
-        run: mv target/${{ matrix.target }}/release/wormhole-rs-webrtc target/release/wormhole-rs-webrtc-${{ matrix.suffix }}
+        run: mv target/${{ matrix.target }}/release/beam-rs-webrtc target/release/beam-rs-webrtc-${{ matrix.suffix }}
 
       - name: Upload WebRTC release artifact
         uses: actions/upload-artifact@v4
         with:
           name: release-webrtc-${{ matrix.suffix }}
-          path: target/release/wormhole-rs-webrtc-${{ matrix.suffix }}
+          path: target/release/beam-rs-webrtc-${{ matrix.suffix }}
 
       - name: Rename Local Binary
-        run: mv target/${{ matrix.target }}/release/wormhole-rs-local target/release/wormhole-rs-local-${{ matrix.suffix }}
+        run: mv target/${{ matrix.target }}/release/beam-rs-local target/release/beam-rs-local-${{ matrix.suffix }}
 
       - name: Upload Local release artifact
         uses: actions/upload-artifact@v4
         with:
           name: release-local-${{ matrix.suffix }}
-          path: target/release/wormhole-rs-local-${{ matrix.suffix }}
+          path: target/release/beam-rs-local-${{ matrix.suffix }}
 
       - name: Rename Tor Binary
-        run: mv target/${{ matrix.target }}/release/wormhole-rs-tor target/release/wormhole-rs-tor-${{ matrix.suffix }}
+        run: mv target/${{ matrix.target }}/release/beam-rs-tor target/release/beam-rs-tor-${{ matrix.suffix }}
 
       - name: Upload Tor release artifact
         uses: actions/upload-artifact@v4
         with:
           name: release-tor-${{ matrix.suffix }}
-          path: target/release/wormhole-rs-tor-${{ matrix.suffix }}
+          path: target/release/beam-rs-tor-${{ matrix.suffix }}
 
   build-other:
     needs: setup
@@ -119,11 +119,11 @@ jobs:
           - os: macos-latest
             target: aarch64-apple-darwin
             suffix: macos-arm64
-            binary: wormhole-rs
+            binary: beam-rs
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             suffix: windows-amd64
-            binary: wormhole-rs.exe
+            binary: beam-rs.exe
     runs-on: ${{ matrix.os }}
 
     steps:
@@ -138,91 +138,91 @@ jobs:
 
       - name: Rename Binary (Unix)
         if: runner.os != 'Windows'
-        run: mv target/${{ matrix.target }}/release/${{ matrix.binary }} target/release/wormhole-rs-${{ matrix.suffix }}
+        run: mv target/${{ matrix.target }}/release/${{ matrix.binary }} target/release/beam-rs-${{ matrix.suffix }}
 
       - name: Rename Binary (Windows)
         if: runner.os == 'Windows'
-        run: move target\${{ matrix.target }}\release\${{ matrix.binary }} target\release\wormhole-rs-${{ matrix.suffix }}.exe
+        run: move target\${{ matrix.target }}\release\${{ matrix.binary }} target\release\beam-rs-${{ matrix.suffix }}.exe
 
       - name: Upload release artifact (Unix)
         if: runner.os != 'Windows'
         uses: actions/upload-artifact@v4
         with:
           name: release-${{ matrix.suffix }}
-          path: target/release/wormhole-rs-${{ matrix.suffix }}
+          path: target/release/beam-rs-${{ matrix.suffix }}
 
       - name: Upload release artifact (Windows)
         if: runner.os == 'Windows'
         uses: actions/upload-artifact@v4
         with:
           name: release-${{ matrix.suffix }}
-          path: target/release/wormhole-rs-${{ matrix.suffix }}.exe
+          path: target/release/beam-rs-${{ matrix.suffix }}.exe
 
       - name: Rename WebRTC Binary (Unix)
         if: runner.os != 'Windows'
-        run: mv target/${{ matrix.target }}/release/wormhole-rs-webrtc target/release/wormhole-rs-webrtc-${{ matrix.suffix }}
+        run: mv target/${{ matrix.target }}/release/beam-rs-webrtc target/release/beam-rs-webrtc-${{ matrix.suffix }}
 
       - name: Rename WebRTC Binary (Windows)
         if: runner.os == 'Windows'
-        run: move target\${{ matrix.target }}\release\wormhole-rs-webrtc.exe target\release\wormhole-rs-webrtc-${{ matrix.suffix }}.exe
+        run: move target\${{ matrix.target }}\release\beam-rs-webrtc.exe target\release\beam-rs-webrtc-${{ matrix.suffix }}.exe
 
       - name: Upload WebRTC release artifact (Unix)
         if: runner.os != 'Windows'
         uses: actions/upload-artifact@v4
         with:
           name: release-webrtc-${{ matrix.suffix }}
-          path: target/release/wormhole-rs-webrtc-${{ matrix.suffix }}
+          path: target/release/beam-rs-webrtc-${{ matrix.suffix }}
 
       - name: Upload WebRTC release artifact (Windows)
         if: runner.os == 'Windows'
         uses: actions/upload-artifact@v4
         with:
           name: release-webrtc-${{ matrix.suffix }}
-          path: target/release/wormhole-rs-webrtc-${{ matrix.suffix }}.exe
+          path: target/release/beam-rs-webrtc-${{ matrix.suffix }}.exe
 
       - name: Rename Local Binary (Unix)
         if: runner.os != 'Windows'
-        run: mv target/${{ matrix.target }}/release/wormhole-rs-local target/release/wormhole-rs-local-${{ matrix.suffix }}
+        run: mv target/${{ matrix.target }}/release/beam-rs-local target/release/beam-rs-local-${{ matrix.suffix }}
 
       - name: Rename Local Binary (Windows)
         if: runner.os == 'Windows'
-        run: move target\${{ matrix.target }}\release\wormhole-rs-local.exe target\release\wormhole-rs-local-${{ matrix.suffix }}.exe
+        run: move target\${{ matrix.target }}\release\beam-rs-local.exe target\release\beam-rs-local-${{ matrix.suffix }}.exe
 
       - name: Upload Local release artifact (Unix)
         if: runner.os != 'Windows'
         uses: actions/upload-artifact@v4
         with:
           name: release-local-${{ matrix.suffix }}
-          path: target/release/wormhole-rs-local-${{ matrix.suffix }}
+          path: target/release/beam-rs-local-${{ matrix.suffix }}
 
       - name: Upload Local release artifact (Windows)
         if: runner.os == 'Windows'
         uses: actions/upload-artifact@v4
         with:
           name: release-local-${{ matrix.suffix }}
-          path: target/release/wormhole-rs-local-${{ matrix.suffix }}.exe
+          path: target/release/beam-rs-local-${{ matrix.suffix }}.exe
 
       - name: Rename Tor Binary (Unix)
         if: runner.os != 'Windows'
-        run: mv target/${{ matrix.target }}/release/wormhole-rs-tor target/release/wormhole-rs-tor-${{ matrix.suffix }}
+        run: mv target/${{ matrix.target }}/release/beam-rs-tor target/release/beam-rs-tor-${{ matrix.suffix }}
 
       - name: Rename Tor Binary (Windows)
         if: runner.os == 'Windows'
-        run: move target\${{ matrix.target }}\release\wormhole-rs-tor.exe target\release\wormhole-rs-tor-${{ matrix.suffix }}.exe
+        run: move target\${{ matrix.target }}\release\beam-rs-tor.exe target\release\beam-rs-tor-${{ matrix.suffix }}.exe
 
       - name: Upload Tor release artifact (Unix)
         if: runner.os != 'Windows'
         uses: actions/upload-artifact@v4
         with:
           name: release-tor-${{ matrix.suffix }}
-          path: target/release/wormhole-rs-tor-${{ matrix.suffix }}
+          path: target/release/beam-rs-tor-${{ matrix.suffix }}
 
       - name: Upload Tor release artifact (Windows)
         if: runner.os == 'Windows'
         uses: actions/upload-artifact@v4
         with:
           name: release-tor-${{ matrix.suffix }}
-          path: target/release/wormhole-rs-tor-${{ matrix.suffix }}.exe
+          path: target/release/beam-rs-tor-${{ matrix.suffix }}.exe
 
   create-release:
     needs: [setup, build-linux, build-other]

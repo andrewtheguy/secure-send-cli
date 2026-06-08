@@ -1,0 +1,33 @@
+[package]
+name = "beam-rs"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "beam-rs"
+path = "src/main.rs"
+
+[dependencies]
+# Common library
+beam-common = { path = "../beam-common", features = ["nostr"] }
+
+# Core dependencies (workspace)
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+anyhow = { workspace = true }
+clap = { workspace = true }
+rand = { workspace = true }
+hex = { workspace = true }
+base64 = { workspace = true }
+serde_json = { workspace = true }
+futures = { workspace = true }
+log = { workspace = true }
+nostr-sdk = { workspace = true }
+tempfile = { workspace = true }
+
+# iroh transport
+iroh = { version = "0.98.2", features = ["address-lookup-mdns"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+
+# Crate-specific dependencies
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

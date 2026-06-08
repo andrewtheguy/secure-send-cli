@@ -7,10 +7,10 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BUILD_DIR="${SCRIPT_DIR}/target/linux"
 DOCKERFILE="${SCRIPT_DIR}/Dockerfile.build"
-IMAGE_NAME="wormhole-rs-builder"
+IMAGE_NAME="beam-rs-builder"
 VERSION="${VERSION:-latest}"
 
-echo "wormhole-rs Multi-Architecture Build Script"
+echo "beam-rs Multi-Architecture Build Script"
 echo "============================================"
 echo ""
 echo "Build directory: $BUILD_DIR"
@@ -37,7 +37,7 @@ rm -rf "$BUILD_DIR"
 mkdir -p "$BUILD_DIR"
 
 # Create or use existing buildx builder
-BUILDER_NAME="wormhole-rs-builder"
+BUILDER_NAME="beam-rs-builder"
 if ! docker buildx inspect "$BUILDER_NAME" &> /dev/null; then
     echo "Creating buildx builder: $BUILDER_NAME"
     docker buildx create --name "$BUILDER_NAME" --use --driver docker-container
@@ -67,7 +67,7 @@ echo "----------------------"
 for arch in amd64 arm64; do
     archdir="$BUILD_DIR/linux_${arch}"
     if [ -d "$archdir" ]; then
-        for bin in wormhole-rs wormhole-rs-webrtc wormhole-rs-local wormhole-rs-tor; do
+        for bin in beam-rs beam-rs-webrtc beam-rs-local beam-rs-tor; do
             if [ -f "$archdir/$bin" ]; then
                 mv "$archdir/$bin" "$BUILD_DIR/${bin}-linux-${arch}"
                 echo "✓ $(echo "$arch" | tr '[:lower:]' '[:upper:]') $bin saved to: $BUILD_DIR/${bin}-linux-${arch}"

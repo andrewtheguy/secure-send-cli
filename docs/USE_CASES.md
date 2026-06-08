@@ -1,31 +1,31 @@
 # Common Use Cases & Scenarios
 
-This guide describes common scenarios where `wormhole-rs` shines and which mode to use for each.
+This guide describes common scenarios where `beam-rs` shines and which mode to use for each.
 
 ## 1. No Internet Access (LAN / Air-gapped)
 **Scenario**: You need to transfer files without using the public internet: either both machines are on the same LAN, or they can still reach each other over a private/routed network while you copy/paste signaling text out-of-band.
 
-**Solution A**: **Local Mode** (`wormhole-rs-local`)
+**Solution A**: **Local Mode** (`beam-rs-local`)
 - **Why**: Uses mDNS discovery and direct TCP. No data leaves your local network. Relies on a short 12‑character PIN instead of a long code.
 - **Command**:
   ```bash
   # Sender
-  wormhole-rs-local send /path/to/file
+  beam-rs-local send /path/to/file
 
   # Receiver
-  wormhole-rs-local receive
+  beam-rs-local receive
   ```
 - **Experience**: The sender is shown a random 12‑character PIN. The receiver finds the sender automatically and is prompted for that PIN.
 
-**Solution B**: **WebRTC Manual Mode** (`wormhole-rs-webrtc send-manual` / `receive-manual`)  
+**Solution B**: **WebRTC Manual Mode** (`beam-rs-webrtc send-manual` / `receive-manual`)  
 - **Why**: Works when mDNS is blocked and peers still have direct IP reachability (same LAN or routed private/VPN network). No Nostr relay required.
 - **Command**:
   ```bash
   # Sender
-  wormhole-rs-webrtc send-manual /path/to/file
+  beam-rs-webrtc send-manual /path/to/file
 
   # Receiver
-  wormhole-rs-webrtc receive-manual
+  beam-rs-webrtc receive-manual
   ```
 - **Experience**: Sender copy/pastes an offer code, receiver replies with an answer code. The exchanged text includes signaling metadata and the encryption key, so use a secure channel.
 
@@ -39,41 +39,41 @@ This guide describes common scenarios where `wormhole-rs` shines and which mode 
 - **Command**:
   ```bash
   # Sender
-  wormhole-rs send /path/to/file
+  beam-rs send /path/to/file
 
   # Receiver (iroh code)
-  wormhole-rs receive --code <WORMHOLE_CODE>
+  beam-rs receive --code <BEAM_CODE>
   ```
-- **Experience**: Share the wormhole code via any channel (chat, paper, verbal). iroh handles NAT traversal automatically without needing IP addresses.
+- **Experience**: Share the beam code via any channel (chat, paper, verbal). iroh handles NAT traversal automatically without needing IP addresses.
 
 ---
 
 ## 3. Cannot Copy-Paste (Cross-device / Remote Terminal)
-**Scenario**: You are sending a file from a laptop to a friend's phone, or to a remote server console where you cannot easily copy and paste the long "Wormhole Code". Typing a huge base64 string is impossible.
+**Scenario**: You are sending a file from a laptop to a friend's phone, or to a remote server console where you cannot easily copy and paste the long "Beam Code". Typing a huge base64 string is impossible.
 
 **Solution A**: **Local Mode** (Recommended for same network)
 - **Why**: Uses a short 12-character PIN with mDNS discovery. No code copying needed.
 - **Command**:
   ```bash
   # Sender
-  wormhole-rs-local send /path/to/file
+  beam-rs-local send /path/to/file
 
   # Receiver
-  wormhole-rs-local receive
+  beam-rs-local receive
   ```
 - **Experience**:
   1. Sender sees: `PIN: A1b2C3d4E5f6` (example)
-  2. Receiver runs `wormhole-rs-local receive` and types `A1b2C3d4E5f6`.
+  2. Receiver runs `beam-rs-local receive` and types `A1b2C3d4E5f6`.
 
 **Solution B**: **PIN Mode** (For internet transfers)
 - **Why**: Uses a short 12-character PIN instead of a long code. The PIN is exchanged via Nostr relays, while the actual file transfer uses iroh transport.
 - **Command**:
   ```bash
   # Sender (iroh transport with PIN exchange)
-  wormhole-rs send --pin /path/to/file
+  beam-rs send --pin /path/to/file
 
   # Receiver (unified command, prompts for PIN)
-  wormhole-rs receive --pin
+  beam-rs receive --pin
   ```
 
 ---
@@ -85,14 +85,14 @@ This guide describes common scenarios where `wormhole-rs` shines and which mode 
 - **Why**: iroh uses QUIC with automatic relay fallback. It tries direct P2P first, then falls back to iroh's relay servers if needed.
 - **Command**:
   ```bash
-  wormhole-rs send /path/to/file
+  beam-rs send /path/to/file
   ```
 
 **Solution B**: **Tor Mode** (for anonymity)
 - **Why**: When you need anonymous transfers where neither party's IP is revealed. Uses Tor hidden services.
 - **Command**:
   ```bash
-  wormhole-rs-tor send /path/to/file
+  beam-rs-tor send /path/to/file
   ```
 
 ---
@@ -100,11 +100,11 @@ This guide describes common scenarios where `wormhole-rs` shines and which mode 
 ## 5. Maximum Anonymity
 **Scenario**: You want to transfer a file without revealing your IP address to the peer or any relay servers.
 
-**Solution**: **Tor Mode** (`wormhole-rs-tor send`)
+**Solution**: **Tor Mode** (`beam-rs-tor send`)
 - **Why**: Creates a Tor Hidden Service for the transfer. Traffic is routed through the Tor network, masking locations of both parties.
 - **Command**:
   ```bash
-  wormhole-rs-tor send /path/to/file
+  beam-rs-tor send /path/to/file
   ```
 
 ---
@@ -115,7 +115,7 @@ This guide describes common scenarios where `wormhole-rs` shines and which mode 
 **Solution**: **iroh Mode** (Recommended)
 - **Why**: Uses QUIC, optimized for high throughput and congestion control. Automatic relay fallback ensures reliable delivery.
   ```bash
-  wormhole-rs send /path/to/large-video.mp4
+  beam-rs send /path/to/large-video.mp4
   ```
 
 ---
@@ -124,18 +124,18 @@ This guide describes common scenarios where `wormhole-rs` shines and which mode 
 **Scenario**: You require complete control over the network infrastructure and cannot rely on public relays due to policy or privacy concerns.
 
 **Solution A**: **iroh Mode + Custom DERP Relays** (Recommended)
-- **Why**: iroh allows you to run your own lightweight relay (DERP). By pointing `wormhole-rs` to your own infrastructure, you achieve a true peer-to-peer connection where no third-party relays are involved.
+- **Why**: iroh allows you to run your own lightweight relay (DERP). By pointing `beam-rs` to your own infrastructure, you achieve a true peer-to-peer connection where no third-party relays are involved.
 - **Resources**: Implementation for the relay server is available in the [iroh repository](https://github.com/n0-computer/iroh).
 - **Command**:
   ```bash
-  wormhole-rs send --relay-url https://my-private-relay.com /path/to/file
+  beam-rs send --relay-url https://my-private-relay.com /path/to/file
   ```
 
 **Solution B**: **Local Mode** (Same network)
 - **Why**: Uses mDNS discovery with no external dependencies. Works completely offline.
 - **Command**:
   ```bash
-  wormhole-rs-local send /path/to/file
+  beam-rs-local send /path/to/file
   ```
 
 ---
@@ -148,4 +148,4 @@ See [ROADMAP.md](ROADMAP.md) for planned features and development priorities.
 
 ## WebRTC Mode
 
-WebRTC mode provides P2P transfers with Nostr signaling for NAT traversal, plus a manual copy/paste path for relay-blocked environments where peers are still directly reachable. See [main README](../README.md#3-webrtc-mode---wormhole-rs-webrtc-send) for usage details.
+WebRTC mode provides P2P transfers with Nostr signaling for NAT traversal, plus a manual copy/paste path for relay-blocked environments where peers are still directly reachable. See [main README](../README.md#3-webrtc-mode---beam-rs-webrtc-send) for usage details.

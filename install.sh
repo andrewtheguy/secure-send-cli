@@ -1,7 +1,7 @@
 #!/bin/bash
 
-# Wormhole-rs installer for Linux and Mac
-# Downloads latest binary from: https://github.com/andrewtheguy/wormhole-rs/releases
+# Beam-rs installer for Linux and Mac
+# Downloads latest binary from: https://github.com/andrewtheguy/beam-rs/releases
 #
 # Usage: ./install.sh [RELEASE_TAG] [--prerelease]
 # Or set RELEASE_TAG environment variable
@@ -9,7 +9,7 @@
 set -e
 
 REPO_OWNER="andrewtheguy"
-REPO_NAME="wormhole-rs"
+REPO_NAME="beam-rs"
 DOWNLOAD_ONLY=false
 PREFER_PRERELEASE=false
 INSTALL_WEBRTC=false
@@ -235,11 +235,11 @@ detect_arch() {
 # Map OS and architecture to binary name
 get_binary_name() {
     if [ "$INSTALL_WEBRTC" = true ]; then
-        BINARY_PREFIX="wormhole-rs-webrtc"
-        INSTALL_NAME="wormhole-rs-webrtc"
+        BINARY_PREFIX="beam-rs-webrtc"
+        INSTALL_NAME="beam-rs-webrtc"
     else
-        BINARY_PREFIX="wormhole-rs"
-        INSTALL_NAME="wormhole-rs"
+        BINARY_PREFIX="beam-rs"
+        INSTALL_NAME="beam-rs"
     fi
 
     case "${OS}-${ARCH}" in
@@ -422,7 +422,7 @@ download_and_install() {
         if [ -n "$profile" ]; then
             # Profile already has .local/bin configured, just needs reload
             print_warn "${target_dir} is not in your current PATH, but is configured in your profile."
-            print_warn "To use wormhole-rs now, reload your profile:"
+            print_warn "To use beam-rs now, reload your profile:"
             echo ""
             echo "    source $profile"
             echo ""
@@ -443,20 +443,20 @@ download_and_install() {
 show_usage() {
     echo "Usage: $0 [OPTIONS] [RELEASE_TAG]"
     echo ""
-    echo "Download and install wormhole-rs binary"
+    echo "Download and install beam-rs binary"
     echo ""
     echo "Options:"
     echo "  --download-only  Download binary to current directory without installing"
     echo "  --prerelease     Use latest prerelease instead of latest stable release"
-    echo "  --webrtc         Install wormhole-rs-webrtc binary instead of wormhole-rs"
+    echo "  --webrtc         Install beam-rs-webrtc binary instead of beam-rs"
     echo "  -h, --help       Show this help message"
     echo ""
     echo "Arguments:"
     echo "  RELEASE_TAG      GitHub release tag to download (default: latest)"
     echo ""
     echo "Examples:"
-    echo "  $0                              # Install latest wormhole-rs"
-    echo "  $0 --webrtc                     # Install wormhole-rs-webrtc"
+    echo "  $0                              # Install latest beam-rs"
+    echo "  $0 --webrtc                     # Install beam-rs-webrtc"
     echo "  $0 20251210172710               # Install specific release"
     echo "  $0 --prerelease                 # Install latest prerelease"
     echo "  $0 --download-only              # Download latest to current directory"
@@ -468,9 +468,9 @@ show_usage() {
 # Main installation function
 install() {
     if [ "$DOWNLOAD_ONLY" = true ]; then
-        print_info "Wormhole-rs downloader"
+        print_info "Beam-rs downloader"
     else
-        print_info "Wormhole-rs installer"
+        print_info "Beam-rs installer"
     fi
     print_info "Release: ${RELEASE_TAG}"
     print_info "Repository: ${REPO_OWNER}/${REPO_NAME}"
@@ -520,9 +520,9 @@ main() {
     parse_args "$@"
 
     if [ "$DOWNLOAD_ONLY" = true ]; then
-        print_info "Starting Wormhole-rs download..."
+        print_info "Starting Beam-rs download..."
     else
-        print_info "Starting Wormhole-rs installation..."
+        print_info "Starting Beam-rs installation..."
         check_privileges
     fi
 
