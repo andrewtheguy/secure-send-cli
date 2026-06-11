@@ -71,9 +71,3 @@ before transfer.
 ```bash
 beam-rs-webrtc send /path/to/folder
 ```
-
----
-
-## 5. Planned / Future Scenarios
-
-See [ROADMAP.md](ROADMAP.md) for planned features and development priorities.

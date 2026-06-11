@@ -237,4 +237,3 @@ This handshake prevents:
 - Accidental file overwrites without user consent
 - Wasted bandwidth on declined transfers
 - Sender continuing after receiver has disconnected
-```
