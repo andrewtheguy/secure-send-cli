@@ -27,11 +27,11 @@ use std::sync::mpsc as stdmpsc;
 use std::time::Duration;
 
 use anyhow::{Result, anyhow};
-use crossterm::cursor::MoveTo;
+use crossterm::cursor::{MoveTo, Show};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
-use crossterm::queue;
+use crossterm::{execute, queue};
 use crossterm::style::{Attribute, Print, SetAttribute};
-use crossterm::terminal::{Clear, ClearType};
+use crossterm::terminal::{Clear, ClearType, disable_raw_mode};
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Layout};
 use ratatui::style::{Style, Stylize};
@@ -47,6 +47,22 @@ use crate::ui::{Phase, Progress, UiSink};
 /// Height (rows) of the inline viewport. Sized to fit the multi-line prompts.
 const VIEWPORT_HEIGHT: u16 = 6;
 const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+/// Restore the terminal after the TUI exits.
+///
+/// Each [`Terminal::draw`] renders with no cursor position, so ratatui hides the
+/// cursor on every frame (`ESC[?25l`) but never re-shows it. We deliberately do
+/// *not* use `ratatui::try_restore` here: it emits `LeaveAlternateScreen`, whose
+/// cursor-restore step re-hides the cursor on some terminals — and we never
+/// entered the alternate screen anyway (the inline viewport doesn't). So the
+/// correct teardown is simply: leave raw mode and show the cursor (last, so
+/// `ESC[?25h` is the final byte and nothing can undo it).
+fn restore_terminal() {
+    let _ = disable_raw_mode();
+    let mut out = io::stdout();
+    let _ = execute!(out, Show);
+    let _ = out.flush();
+}
 
 // ============================================================================
 // Public entry points
@@ -97,7 +113,7 @@ pub fn start() -> Option<TuiHandle> {
                 }
                 Err(_) => {
                     let _ = init_tx.send(false);
-                    ratatui::try_restore().ok();
+                    restore_terminal();
                     return;
                 }
             };
@@ -110,7 +126,7 @@ pub fn start() -> Option<TuiHandle> {
                 let _ = render_loop(&mut terminal, rx);
             }));
             // Best-effort restore (a cancel path may already have restored).
-            ratatui::try_restore().ok();
+            restore_terminal();
         })
         .expect("failed to spawn TUI thread");
 
@@ -335,7 +351,7 @@ fn terminal_width(terminal: &DefaultTerminal) -> u16 {
 /// Restore the terminal and trigger the normal interrupt path.
 fn cancel_and_exit(terminal: &mut DefaultTerminal) {
     let _ = terminal.clear();
-    ratatui::try_restore().ok();
+    restore_terminal();
     #[cfg(unix)]
     // SAFETY: raising a signal is async-signal-safe and has no preconditions.
     unsafe {
