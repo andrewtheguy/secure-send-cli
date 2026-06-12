@@ -1,7 +1,7 @@
 #!/usr/bin/env pwsh
 
 # Xfer installer for Windows
-# Downloads latest binary from: https://github.com/andrewtheguy/xfer/releases
+# Downloads latest binary from: https://github.com/andrewtheguy/xfer-webrtc/releases
 #
 # Invocation is now argument-parsed only (compat-breaking): flags are read from
 # $args or $env:XFER_INSTALL_ARGS. Param binding is removed.
@@ -15,7 +15,7 @@ $DownloadOnly = $false
 $ErrorActionPreference = "Stop"
 
 $REPO_OWNER = "andrewtheguy"
-$REPO_NAME = "xfer"
+$REPO_NAME = "xfer-webrtc"
 
 # Allow passing flags when the script is piped into Invoke-Expression (iex) where
 # normal PowerShell parameter binding is unavailable. Users can set

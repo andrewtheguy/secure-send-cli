@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Xfer installer for Linux and Mac
-# Downloads latest binary from: https://github.com/andrewtheguy/xfer/releases
+# Downloads latest binary from: https://github.com/andrewtheguy/xfer-webrtc/releases
 #
 # Usage: ./install.sh [RELEASE_TAG] [--prerelease]
 # Or set RELEASE_TAG environment variable
@@ -9,7 +9,7 @@
 set -e
 
 REPO_OWNER="andrewtheguy"
-REPO_NAME="xfer"
+REPO_NAME="xfer-webrtc"
 DOWNLOAD_ONLY=false
 PREFER_PRERELEASE=false
 
@@ -25,11 +25,13 @@ print_info() {
 }
 
 print_warn() {
-    echo -e "${YELLOW}[WARN]${NC} $1"
+    # stderr: keep diagnostics out of stdout captured by $(...) command substitution
+    echo -e "${YELLOW}[WARN]${NC} $1" >&2
 }
 
 print_error() {
-    echo -e "${RED}[ERROR]${NC} $1"
+    # stderr: ensures errors raised inside command substitution are still shown
+    echo -e "${RED}[ERROR]${NC} $1" >&2
 }
 
 # Fetch the latest stable release tag (non-prerelease)
