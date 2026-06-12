@@ -1,6 +1,4 @@
-//! Transport-agnostic folder operations for tar archive creation and extraction.
-//!
-//! This module provides common folder handling logic used by both iroh and Tor transports.
+//! Folder operations for tar archive creation and extraction.
 
 use anyhow::{Context, Result};
 use std::cmp;
@@ -10,7 +8,7 @@ use tar::{Archive, Builder};
 use tempfile::NamedTempFile;
 use walkdir::WalkDir;
 
-use crate::core::transfer::{contains_path_traversal, recv_encrypted_chunk};
+use crate::core::transfer::{contains_path_traversal, recv_chunk};
 
 /// Result of creating a tar archive from a folder.
 pub struct TarArchive {
@@ -122,7 +120,7 @@ pub fn create_tar_archive(folder_path: &Path) -> Result<TarArchive> {
 /// tar extraction (which calls `Read::read()`) to a blocking thread pool:
 ///
 /// ```ignore
-/// let reader = StreamingReader::new(stream, key, file_size, runtime_handle);
+/// let reader = StreamingReader::new(stream, file_size, runtime_handle);
 /// let result = tokio::task::spawn_blocking(move || {
 ///     extract_tar_archive_returning_reader(reader, &extract_dir)
 /// }).await?;
@@ -134,7 +132,6 @@ pub fn create_tar_archive(folder_path: &Path) -> Result<TarArchive> {
 /// an async function without `spawn_blocking`) will cause a panic or deadlock.
 pub struct StreamingReader<R> {
     recv_stream: R,
-    key: [u8; 32],
     chunk_num: u64,
     buffer: Vec<u8>,
     buffer_pos: usize,
@@ -148,18 +145,11 @@ impl<R> StreamingReader<R> {
     ///
     /// # Arguments
     /// * `recv_stream` - The async stream to read from
-    /// * `key` - AES-256-GCM encryption key
     /// * `file_size` - Total expected bytes to read
     /// * `runtime_handle` - Tokio runtime handle for blocking operations
-    pub fn new(
-        recv_stream: R,
-        key: [u8; 32],
-        file_size: u64,
-        runtime_handle: tokio::runtime::Handle,
-    ) -> Self {
+    pub fn new(recv_stream: R, file_size: u64, runtime_handle: tokio::runtime::Handle) -> Self {
         Self {
             recv_stream,
-            key,
             chunk_num: 1, // Chunks start at 1, header was 0
             buffer: Vec::new(),
             buffer_pos: 0,
@@ -199,7 +189,7 @@ impl<R: tokio::io::AsyncReadExt + Unpin + Send> Read for StreamingReader<R> {
             // See struct documentation for the correct usage pattern.
             let chunk_result = self
                 .runtime_handle
-                .block_on(async { recv_encrypted_chunk(&mut self.recv_stream, &self.key).await });
+                .block_on(async { recv_chunk(&mut self.recv_stream).await });
 
             match chunk_result {
                 Ok(chunk) => {

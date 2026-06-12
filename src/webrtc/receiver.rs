@@ -8,8 +8,8 @@ use tokio::time::{Duration, timeout};
 use webrtc::ice_transport::ice_candidate::RTCIceCandidateInit;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 
+use crate::core::beam::parse_code;
 use crate::core::transfer::run_receiver_transfer;
-use crate::core::beam::{PROTOCOL_WEBRTC, decode_key, parse_code};
 
 use crate::signaling::nostr::{NostrSignaling, SignalingMessage, create_receiver_signaling};
 use crate::signaling::offline::ice_candidates_to_payloads;
@@ -37,7 +37,6 @@ enum WebRtcResult {
 async fn try_webrtc_receive(
     signaling: &NostrSignaling,
     sender_pubkey: &nostr_sdk::PublicKey,
-    key: &[u8; 32],
     output_dir: Option<PathBuf>,
     no_resume: bool,
 ) -> Result<WebRtcResult> {
@@ -166,7 +165,7 @@ async fn try_webrtc_receive(
     }
 
     // Use common transfer protocol
-    let (_, stream) = run_receiver_transfer(stream, *key, output_dir, no_resume).await?;
+    let (_, stream) = run_receiver_transfer(stream, output_dir, no_resume).await?;
 
     // Wait for sender to close the connection (confirms ACK was received)
     // This ensures the ACK is delivered before we close our side
@@ -190,34 +189,15 @@ pub async fn receive_webrtc(
     // Parse the beam code
     let token = parse_code(code).context("Failed to parse beam code")?;
 
-    if token.protocol != PROTOCOL_WEBRTC {
-        anyhow::bail!("Expected webrtc protocol, got: {}", token.protocol);
-    }
-
-    // Extract webrtc-specific fields
-    let sender_pubkey_hex = token
-        .webrtc_sender_pubkey
-        .clone()
-        .context("Missing sender pubkey in beam code")?;
-    let transfer_id = token
-        .webrtc_transfer_id
-        .clone()
-        .context("Missing transfer ID in beam code")?;
-    let relays = token
-        .webrtc_relays
-        .clone()
-        .context("Missing relay list in beam code")?;
-    let key_str = Some(token.key.as_str())
-        .filter(|s| !s.is_empty())
-        .context("Missing encryption key in beam code")?;
-    let key = decode_key(key_str).context("Failed to decode encryption key")?;
+    let sender_pubkey_hex = token.sender_pubkey.clone();
+    let transfer_id = token.transfer_id.clone();
+    let relays = token.relays.clone();
 
     // Parse sender public key
     let sender_pubkey: nostr_sdk::PublicKey = sender_pubkey_hex
         .parse()
         .context("Failed to parse sender public key")?;
 
-    eprintln!("Encryption enabled");
     eprintln!("Connecting to sender: {}", sender_pubkey_hex);
 
     // Create Nostr signaling client
@@ -227,7 +207,7 @@ pub async fn receive_webrtc(
     eprintln!("Receiver pubkey: {}", signaling.public_key().to_hex());
 
     // Try WebRTC transfer
-    match try_webrtc_receive(&signaling, &sender_pubkey, &key, output_dir.clone(), no_resume).await? {
+    match try_webrtc_receive(&signaling, &sender_pubkey, output_dir.clone(), no_resume).await? {
         WebRtcResult::Success => {
             signaling.disconnect().await;
             eprintln!("Connection closed.");

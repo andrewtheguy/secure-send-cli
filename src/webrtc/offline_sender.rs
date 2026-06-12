@@ -9,7 +9,6 @@ use tokio::time::Duration;
 use webrtc::ice_transport::ice_candidate::RTCIceCandidateInit;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 
-use crate::core::crypto::generate_key;
 use crate::core::transfer::{
     FileHeader, Interrupted, TransferType, prepare_file_for_send, prepare_folder_for_send,
     run_sender_transfer, setup_temp_file_cleanup_handler,
@@ -86,10 +85,6 @@ async fn transfer_offline_internal(
     checksum: u64,
     transfer_type: TransferType,
 ) -> Result<()> {
-    // Generate encryption key
-    let key = generate_key();
-    eprintln!("Encryption enabled for transfer");
-
     eprintln!("\nPreparing WebRTC offline transfer...");
 
     // Create WebRTC peer with STUN for NAT traversal
@@ -136,7 +131,6 @@ async fn transfer_offline_internal(
                 TransferType::File => "file".to_string(),
                 TransferType::Folder => "folder".to_string(),
             },
-            encryption_key: hex::encode(key),
         },
         created_at,
     };
@@ -215,7 +209,7 @@ async fn transfer_offline_internal(
 
     // Use common transfer protocol
     let mut stream = stream;
-    let result = run_sender_transfer(&mut file, &mut stream, &key, &header).await;
+    let result = run_sender_transfer(&mut file, &mut stream, &header).await;
 
     // Close connections
     let _ = rtc_peer_arc.close().await;

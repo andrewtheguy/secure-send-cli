@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use tokio::io::AsyncReadExt;
 use xxhash_rust::xxh64::Xxh64;
 
-use crate::core::crypto::CHUNK_SIZE;
+use crate::core::transfer::CHUNK_SIZE;
 
 /// Magic bytes at the start of resume temp files
 const RESUME_MAGIC: &[u8; 4] = b"WHRM";

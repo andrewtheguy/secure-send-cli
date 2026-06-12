@@ -11,11 +11,10 @@ use tokio::time::{Duration, timeout};
 use webrtc::ice_transport::ice_candidate::RTCIceCandidateInit;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 
-use crate::core::crypto::generate_key;
+use crate::core::beam::generate_webrtc_code;
 use crate::core::transfer::{
     FileHeader, TransferType, format_bytes, run_sender_transfer, send_file_with, send_folder_with,
 };
-use crate::core::beam::generate_webrtc_code;
 
 use crate::signaling::nostr::{NostrSignaling, SignalingMessage, create_sender_signaling};
 use crate::signaling::offline::ice_candidates_to_payloads;
@@ -117,7 +116,6 @@ enum WebRtcResult {
 async fn try_webrtc_transfer(
     file: &mut File,
     header: &FileHeader,
-    key: &[u8; 32],
     signaling: &NostrSignaling,
 ) -> Result<WebRtcResult> {
     eprintln!("Attempting WebRTC connection...");
@@ -245,7 +243,7 @@ async fn try_webrtc_transfer(
     let rtc_peer = Arc::new(rtc_peer);
 
     // Use common transfer protocol
-    let result = run_sender_transfer(file, &mut stream, key, header).await;
+    let result = run_sender_transfer(file, &mut stream, header).await;
 
     // Cleanup
     let _ = rtc_peer.close().await;
@@ -267,10 +265,6 @@ async fn transfer_data_webrtc_internal(
     custom_relays: Option<Vec<String>>,
     use_default_relays: bool,
 ) -> Result<()> {
-    // Generate encryption key (always required)
-    let key = generate_key();
-    eprintln!("Encryption enabled for transfer");
-
     // Create Nostr signaling client
     eprintln!("Connecting to Nostr relays for signaling...");
     let signaling = create_sender_signaling(custom_relays.clone(), use_default_relays).await?;
@@ -280,10 +274,9 @@ async fn transfer_data_webrtc_internal(
 
     // Generate beam code
     let code = generate_webrtc_code(
-        &key,
         signaling.public_key().to_hex(),
         signaling.transfer_id().to_string(),
-        Some(signaling.relay_urls().to_vec()),
+        signaling.relay_urls().to_vec(),
         filename.clone(),
         match transfer_type {
             TransferType::File => "file",
@@ -301,7 +294,7 @@ async fn transfer_data_webrtc_internal(
     let header = FileHeader::new(transfer_type, filename.clone(), file_size, checksum);
 
     // Try WebRTC transfer
-    match try_webrtc_transfer(&mut file, &header, &key, &signaling).await? {
+    match try_webrtc_transfer(&mut file, &header, &signaling).await? {
         WebRtcResult::Success => {
             signaling.disconnect().await;
             eprintln!("Connection closed.");

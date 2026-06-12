@@ -3,11 +3,11 @@
 > [!NOTE]
 > This project is still work in progress (0.0.x). No backward compatibility is guaranteed between versions.
 
-A secure, cross-platform, single-binary peer-to-peer file transfer tool built on WebRTC data channels with AES-256-GCM end-to-end encryption.
+A secure, cross-platform, single-binary peer-to-peer file transfer tool built on encrypted WebRTC data channels.
 
 ## Features
 
-- **End-to-end encryption** - All transfers use AES-256-GCM encryption on top of WebRTC's DTLS transport
+- **End-to-end encryption** - WebRTC data channels encrypt transfers with DTLS
 - **WebRTC data channels** - Direct peer-to-peer connectivity with STUN-based NAT traversal
 - **Nostr signaling** - Online connection setup via Nostr relays (with relay auto-discovery)
 - **Manual signaling** - Offline copy/paste offer/answer exchange when relays are unavailable
@@ -59,8 +59,8 @@ cargo build --release -p beam-rs-webrtc
 
 ## Usage
 
-Transfers use a **Beam Code** to establish the connection. The code carries the
-encryption key, so only share it through a channel you trust.
+Transfers use a **Beam Code** to establish the connection. The code carries
+signaling metadata for the WebRTC session.
 
 ### Online (Nostr signaling)
 
@@ -115,9 +115,6 @@ The receiver uses the same `receive` command for both modes: paste a beam code
 for a normal Nostr transfer, or paste a manual offer code and it is detected
 automatically.
 
-The manual offer/answer codes contain the encryption key, so only share them
-through a secure channel (SSH, remote desktop, encrypted chat).
-
 ## Common Use Cases
 
 See [USE_CASES.md](docs/USE_CASES.md) for detailed scenarios.
@@ -126,18 +123,17 @@ For protocol details and wire formats, see [ARCHITECTURE.md](docs/ARCHITECTURE.m
 
 ## Security
 
-beam-rs-webrtc provides dual-layer end-to-end encryption: WebRTC's DTLS on the
-wire plus AES-256-GCM on the content. The **Beam Code** (or the manual
-offer/answer codes) carries the key material.
+beam-rs-webrtc relies on WebRTC data channel encryption. Nostr and manual
+signaling exchange only connection setup metadata; file bytes flow directly
+peer-to-peer over DTLS.
 
-| Signaling | Transport Encryption | Content Encryption | Key Exchange |
-|-----------|----------------------|--------------------|--------------|
-| Nostr (online) | DTLS (WebRTC) | AES-256-GCM | Beam Code |
-| Manual (offline) | DTLS (WebRTC) | AES-256-GCM | Offer/answer codes |
+| Signaling | Transfer Encryption | Signaling Payload |
+|-----------|---------------------|-------------------|
+| Nostr (online) | DTLS (WebRTC) | Transfer ID, sender pubkey, relays, file metadata |
+| Manual (offline) | DTLS (WebRTC) | SDP, ICE candidates, file metadata |
 
-Nostr relays are used only for signaling and never see decrypted content or the
-content-encryption key. Media flows directly peer-to-peer over the WebRTC data
-channel.
+Nostr relays are used only for signaling and never see file content. Media flows
+directly peer-to-peer over the WebRTC data channel.
 
 For the detailed security model, see [ARCHITECTURE.md](docs/ARCHITECTURE.md#security-model).
 

@@ -43,8 +43,8 @@ directly over a LAN or routed private/VPN network.
   ```
 - **Experience**: The sender prints an offer code; the receiver pastes it into
   `receive` (which auto-detects manual mode) and replies with an answer code. The
-  exchanged text includes signaling metadata and the encryption key, so use a
-  secure channel (SSH, remote desktop, encrypted chat).
+  exchanged text includes signaling metadata needed to establish the WebRTC
+  data channel.
 
 ---
 
@@ -54,7 +54,7 @@ rely on auto-discovered public relays due to policy or privacy concerns.
 
 **Solution**: **Custom Relays**
 - **Why**: Point both sides at your own Nostr relay(s). The relays only ever see
-  signaling traffic, never decrypted content or the content-encryption key.
+  signaling traffic, never file content.
 - **Command**:
   ```bash
   beam-rs-webrtc send --relay wss://my-relay.example.com /path/to/file

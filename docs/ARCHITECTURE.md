@@ -32,7 +32,7 @@ sequenceDiagram
     Sender->>Nostr: 3. Connect & Subscribe
     Sender->>Nostr: 4. Publish Offer (SDP)
 
-    Note over Sender: Display beam code (transfer-id, pubkey, relays, AES key)
+    Note over Sender: Display beam code (transfer-id, pubkey, relays, metadata)
     Note over Sender: Gathering ICE candidates...
 
     Sender-->>Nostr: (async) Publish ICE candidates as gathered
@@ -53,16 +53,15 @@ sequenceDiagram
 
     Note over Sender,Receiver: ICE connectivity checks, WebRTC connection established
 
-    Note over Sender,Receiver: Shared AES-256-GCM key is embedded in the beam code
-    Sender->>Receiver: 11. Send Encrypted Header (AES-256-GCM)
+    Sender->>Receiver: 11. Send Header
     alt User accepts transfer
-        Receiver->>Sender: 12. Send Encrypted PROCEED
+        Receiver->>Sender: 12. Send PROCEED
     else User declines
-        Receiver->>Sender: 12. Send Encrypted ABORT
+        Receiver->>Sender: 12. Send ABORT
     end
 
     loop 16KB chunks
-        Sender->>Receiver: Send Encrypted Chunk
+        Sender->>Receiver: Send Chunk
     end
 
     Receiver->>Sender: ACK
@@ -70,11 +69,11 @@ sequenceDiagram
 
 ### 2. Manual WebRTC Mode (offline signaling)
 
-Manual mode uses the same WebRTC DataChannel transport and encrypted transfer
-protocol as Nostr-signaled mode, but replaces relay signaling with two
+Manual mode uses the same WebRTC DataChannel transport and transfer protocol as
+Nostr-signaled mode, but replaces relay signaling with two
 user-copied payloads. The offer contains the SDP offer, sender ICE candidates,
-transfer metadata, creation timestamp, and AES key. The answer contains the SDP
-answer and receiver ICE candidates.
+transfer metadata, and creation timestamp. The answer contains the SDP answer
+and receiver ICE candidates.
 
 ```mermaid
 sequenceDiagram
@@ -86,7 +85,7 @@ sequenceDiagram
     Sender->>Sender: 2. Create SDP offer
     Sender->>Sender: 3. Gather sender ICE candidates
     Sender->>Sender: 4. Generate manual offer payload
-    Note over Sender: Offer = SDP offer + ICE candidates + transfer info + created_at + AES key
+    Note over Sender: Offer = SDP offer + ICE candidates + transfer info + created_at
 
     Sender->>User: 5. Display offer code
     User->>Receiver: 6. Paste offer code into receive (auto-detected)
@@ -102,21 +101,19 @@ sequenceDiagram
     Sender->>Sender: 13. Set remote answer and add receiver ICE candidates
 
     Note over Sender,Receiver: ICE connectivity checks, WebRTC connection established
-    Note over Sender,Receiver: The manual offer carries the AES-256-GCM key
-
-    Sender->>Receiver: 14. Send Encrypted Header (AES-256-GCM)
+    Sender->>Receiver: 14. Send Header
     alt User accepts transfer
-        Receiver->>Sender: 15. Send Encrypted PROCEED
+        Receiver->>Sender: 15. Send PROCEED
     else User declines or file conflict
-        Receiver->>Sender: 15. Send Encrypted ABORT
+        Receiver->>Sender: 15. Send ABORT
         Note over Sender,Receiver: Transfer cancelled
     end
 
     loop 16KB chunks
-        Sender->>Receiver: Send Encrypted Chunk
+        Sender->>Receiver: Send Chunk
     end
 
-    Receiver->>Sender: 16. Send Encrypted ACK
+    Receiver->>Sender: 16. Send ACK
 ```
 
 ## Connection Modes
@@ -125,28 +122,23 @@ sequenceDiagram
 - **Transport**: WebRTC DataChannel over DTLS
 - **Discovery**: Nostr relays for SDP/ICE signaling (relays auto-discovered, or set with `--relay` / `--default-relays`)
 - **NAT Traversal**: ICE with multiple public STUN servers (Google + Cloudflare)
-- **Key Exchange**: Beam code (carries the AES key)
-- **Encryption**: DTLS (WebRTC built-in) + AES-256-GCM at application layer
+- **Beam Code**: Transfer ID, sender pubkey, relays, and file metadata
+- **Encryption**: DTLS (WebRTC built-in)
 
 ### Manual WebRTC Mode (`beam-rs-webrtc send --manual`)
 - **Transport**: WebRTC DataChannel over DTLS
 - **Discovery**: Manual copy/paste offer and answer payloads containing SDP and ICE candidates
 - **NAT Traversal**: ICE with multiple public STUN servers (Google + Cloudflare)
-- **Key Exchange**: Manual offer payload (carries the AES key and must be shared over a trusted channel)
-- **Encryption**: DTLS (WebRTC built-in) + AES-256-GCM at application layer
+- **Offer Payload**: SDP, ICE candidates, file metadata, and creation timestamp
+- **Encryption**: DTLS (WebRTC built-in)
 
 ## Security Model
 
-### WebRTC Mode Encryption (Dual Layer)
-WebRTC mode uses two encryption layers for defense in depth:
+### WebRTC Mode Encryption
 
 **Transport Layer (WebRTC/DTLS)**:
 - DTLS encryption for all data channel traffic
 - ICE consent for periodic connectivity verification
-
-**Application Layer (beam-rs)**:
-- AES-256-GCM encryption for all data: headers, chunks, and control signals
-- Per-transfer random key embedded in the beam code (or the manual offer payload)
 
 ### TTL (Time-To-Live) Validation
 
@@ -155,7 +147,7 @@ validated against a TTL to prevent replay attacks and stale session
 establishment.
 
 **Implementation:**
-- **Token Version**: v4 tokens include a `created_at` Unix timestamp
+- **Token Version**: v5 tokens include a `created_at` Unix timestamp
 - **TTL Duration**: 60 minutes (`SESSION_TTL_SECS = 3600`)
 - **Clock Skew**: Allows up to 60 seconds into the future to handle minor clock drift
 
@@ -169,29 +161,28 @@ establishment.
 
 ## Wire Protocol Format
 
-### Encrypted Message Format
+### Message Format
 
-WebRTC uses a length-prefixed encrypted framing. The `DataChannelStream` adapter
-bridges WebRTC's `RTCDataChannel` to tokio's `AsyncRead/AsyncWrite`, so the
-transfer protocol works over the data channel like any byte stream.
+WebRTC uses length-prefixed framing over the encrypted DataChannel. The
+`DataChannelStream` adapter bridges WebRTC's `RTCDataChannel` to tokio's
+`AsyncRead/AsyncWrite`, so the transfer protocol works over the data channel
+like any byte stream.
 
 ```
-[length: 4 bytes BE][encrypted_payload]
+[length: 4 bytes BE][payload]
 ```
 
-- **length**: Big-endian u32 indicating total size of `encrypted_payload`
-- **encrypted_payload**: `nonce (12 bytes) || ciphertext || tag (16 bytes)`
+- **length**: Big-endian u32 indicating total size of `payload`
+- **payload**: Serialized header bytes, file chunk bytes, or control signal bytes
 
 ### Control Signals
 
-Control signals are encrypted messages sent over the same length-prefixed framing as data:
+Control signals are sent over the same length-prefixed framing as data:
 
 - **PROCEED**: receiver accepts transfer
 - **ABORT**: receiver declines transfer
 - **ACK**: receiver confirms all expected bytes were received
 - **RESUME:<offset>**: receiver requests resume from a byte offset (files only)
-
-These signals are not tied to chunk numbers and use fresh random nonces like all other encrypted messages.
 
 ### Resumable File On-Disk Flow
 
@@ -213,19 +204,11 @@ When the transfer completes successfully:
 Keeping both temp/staging files in the same directory ensures the final rename
 is on the same filesystem, which enables atomic replacement semantics.
 
-### Nonce Derivation
-
-AES-256-GCM requires a unique 12-byte nonce for each encryption operation with
-the same key. beam-rs generates a fresh random 96-bit nonce per message and
-prefixes it to the ciphertext, so the receiver can decrypt directly. With 16KB
-chunks and a per-transfer key, the conservative 2^32 random-nonce limit
-corresponds to ~64 TiB per transfer.
-
 ### Confirmation Handshake
 
 Before data transfer begins, the receiver validates the incoming transfer:
 
-1. **Sender** sends encrypted file header containing filename, size, and transfer type
+1. **Sender** sends file header containing filename, size, and transfer type
 2. **Receiver** checks:
    - If file already exists at destination
    - If user wants to proceed (interactive prompt)

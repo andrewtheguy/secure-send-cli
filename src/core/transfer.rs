@@ -6,10 +6,11 @@ use tempfile::NamedTempFile;
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use crate::core::crypto::{CHUNK_SIZE, decrypt, encrypt};
 use crate::core::folder::{create_tar_archive, print_tar_creation_info};
 use crate::core::resume::calculate_file_checksum;
 use crate::ui::{self, Direction, Progress};
+
+pub const CHUNK_SIZE: usize = 16 * 1024; // 16KB chunks
 
 /// Error returned when a transfer is interrupted by Ctrl+C.
 ///
@@ -166,7 +167,7 @@ impl FileHeader {
     }
 }
 
-/// Send a header over the stream (unencrypted, relies on QUIC/TLS)
+/// Send a header over the stream.
 /// Format: header_len (4 bytes) || header_data
 pub async fn send_header<W: AsyncWriteExt + Unpin>(
     writer: &mut W,
@@ -184,33 +185,10 @@ pub async fn send_header<W: AsyncWriteExt + Unpin>(
     Ok(())
 }
 
-/// Send an encrypted header over the stream (uses chunk_num 0)
-/// Format: header_len (4 bytes) || encrypted_header
-pub async fn send_encrypted_header<W: AsyncWriteExt + Unpin>(
-    writer: &mut W,
-    key: &[u8; 32],
-    header: &FileHeader,
-) -> Result<()> {
-    let header_bytes = header.to_bytes().context("Failed to serialize header")?;
-    let encrypted = encrypt(key, &header_bytes)?;
-
-    // Write length prefix
-    let len = encrypted.len() as u32;
-    writer.write_all(&len.to_be_bytes()).await?;
-
-    // Write encrypted header
-    writer.write_all(&encrypted).await?;
-
-    // Flush to ensure header is sent immediately (required for Tor streams)
-    writer.flush().await?;
-
-    Ok(())
-}
-
 // Maximum header size (64KB - headers contain filename + metadata, this is generous)
 const MAX_HEADER_SIZE: usize = 64 * 1024;
 
-/// Receive a header from the stream (unencrypted, relies on QUIC/TLS)
+/// Receive a header from the stream.
 pub async fn recv_header<R: AsyncReadExt + Unpin>(reader: &mut R) -> Result<FileHeader> {
     // Read length prefix
     let mut len_buf = [0u8; 4];
@@ -242,45 +220,7 @@ pub async fn recv_header<R: AsyncReadExt + Unpin>(reader: &mut R) -> Result<File
     FileHeader::from_bytes(&data)
 }
 
-/// Receive and decrypt a header from the stream (uses chunk_num 0)
-pub async fn recv_encrypted_header<R: AsyncReadExt + Unpin>(
-    reader: &mut R,
-    key: &[u8; 32],
-) -> Result<FileHeader> {
-    // Read length prefix
-    let mut len_buf = [0u8; 4];
-    reader
-        .read_exact(&mut len_buf)
-        .await
-        .context("Failed to read header length")?;
-    let len = u32::from_be_bytes(len_buf) as usize;
-
-    // Validate header size to prevent huge allocations from malicious peers
-    if len == 0 {
-        anyhow::bail!("Invalid header: length is zero");
-    }
-    if len > MAX_HEADER_SIZE {
-        anyhow::bail!(
-            "Header size {} exceeds maximum {} bytes",
-            len,
-            MAX_HEADER_SIZE
-        );
-    }
-
-    // Read encrypted header
-    let mut encrypted = vec![0u8; len];
-    reader
-        .read_exact(&mut encrypted)
-        .await
-        .context("Failed to read header data")?;
-
-    // Decrypt
-    let decrypted = decrypt(key, &encrypted)?;
-
-    FileHeader::from_bytes(&decrypted)
-}
-
-/// Send a chunk over the stream (unencrypted, relies on QUIC/TLS)
+/// Send a chunk over the stream.
 /// Format: chunk_len (4 bytes) || chunk_data
 pub async fn send_chunk<W: AsyncWriteExt + Unpin>(writer: &mut W, data: &[u8]) -> Result<()> {
     // Write length prefix
@@ -293,29 +233,9 @@ pub async fn send_chunk<W: AsyncWriteExt + Unpin>(writer: &mut W, data: &[u8]) -
     Ok(())
 }
 
-/// Send an encrypted chunk over the stream
-/// Format: chunk_len (4 bytes) || encrypted_chunk
-pub async fn send_encrypted_chunk<W: AsyncWriteExt + Unpin>(
-    writer: &mut W,
-    key: &[u8; 32],
-    data: &[u8],
-) -> Result<()> {
-    let encrypted = encrypt(key, data)?;
+const MAX_CHUNK_SIZE: usize = CHUNK_SIZE;
 
-    // Write length prefix
-    let len = encrypted.len() as u32;
-    writer.write_all(&len.to_be_bytes()).await?;
-
-    // Write encrypted data
-    writer.write_all(&encrypted).await?;
-
-    Ok(())
-}
-
-// Maximum chunk size (CHUNK_SIZE + reasonable overhead for encryption tags/nonce)
-const MAX_CHUNK_SIZE: usize = CHUNK_SIZE + 256;
-
-/// Receive a chunk from the stream (unencrypted, relies on QUIC/TLS)
+/// Receive a chunk from the stream.
 pub async fn recv_chunk<R: AsyncReadExt + Unpin>(reader: &mut R) -> Result<Vec<u8>> {
     // Read length prefix
     let mut len_buf = [0u8; 4];
@@ -337,39 +257,6 @@ pub async fn recv_chunk<R: AsyncReadExt + Unpin>(reader: &mut R) -> Result<Vec<u
         .context("Failed to read chunk data")?;
 
     Ok(data)
-}
-
-/// Receive and decrypt a chunk from the stream
-pub async fn recv_encrypted_chunk<R: AsyncReadExt + Unpin>(
-    reader: &mut R,
-    key: &[u8; 32],
-) -> Result<Vec<u8>> {
-    // Read length prefix
-    let mut len_buf = [0u8; 4];
-    reader
-        .read_exact(&mut len_buf)
-        .await
-        .context("Failed to read chunk length")?;
-    let len = u32::from_be_bytes(len_buf) as usize;
-
-    // Validate chunk size to prevent OOM from malicious length prefix
-    if len > MAX_CHUNK_SIZE {
-        anyhow::bail!(
-            "Encrypted chunk size {} exceeds maximum {}",
-            len,
-            MAX_CHUNK_SIZE
-        );
-    }
-
-    // Read encrypted data
-    let mut encrypted = vec![0u8; len];
-    reader
-        .read_exact(&mut encrypted)
-        .await
-        .context("Failed to read chunk data")?;
-
-    // Decrypt
-    decrypt(key, &encrypted)
 }
 
 /// Calculate number of chunks for a file
@@ -547,7 +434,7 @@ pub async fn prepare_folder_for_send(folder_path: &Path) -> Result<Option<Prepar
 }
 
 // ============================================================================
-// Generic sender wrappers (reduce code duplication across transport modes)
+// Generic sender wrappers (reduce duplication between files and folders)
 // ============================================================================
 
 /// Generic file sender that accepts a closure for mode-specific transfer logic.
@@ -638,17 +525,11 @@ where
 // Confirmation handshake protocol (file exists check before data transfer)
 // ============================================================================
 
-// Legacy plaintext signals (kept for reference, use encrypted versions below)
-/// Signal sent by receiver to indicate transfer should proceed
-pub const PROCEED_SIGNAL: &[u8] = b"PROCEED";
-/// Signal sent by receiver to abort transfer (e.g., file exists and user declined)
-pub const ABORT_SIGNAL: &[u8] = b"ABORT\0\0"; // Padded to 7 bytes like PROCEED
-
-/// Maximum size for encrypted control signals (prevents OOM from malicious length prefixes)
-/// Control signals are small (e.g., "ACK", "PROCEED", "RESUME:"+8 bytes) plus encryption overhead
+/// Maximum size for control signals (prevents OOM from malicious length prefixes).
+/// Control signals are small, e.g. "ACK", "PROCEED", or "RESUME:"+8 bytes.
 const MAX_CONTROL_SIGNAL_SIZE: usize = 1024;
 
-/// Control signal types for encrypted handshake
+/// Control signal types for the transfer handshake.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ControlSignal {
     Proceed,
@@ -659,60 +540,41 @@ pub enum ControlSignal {
     Resume(u64),
 }
 
-/// Send encrypted PROCEED signal
-pub async fn send_proceed<W: AsyncWriteExt + Unpin>(writer: &mut W, key: &[u8; 32]) -> Result<()> {
-    let encrypted = encrypt(key, b"PROCEED")?;
-    let len = encrypted.len() as u32;
+async fn send_control_payload<W: AsyncWriteExt + Unpin>(writer: &mut W, payload: &[u8]) -> Result<()> {
+    let len = payload.len() as u32;
     writer.write_all(&len.to_be_bytes()).await?;
-    writer.write_all(&encrypted).await?;
+    writer.write_all(payload).await?;
     writer.flush().await?;
     Ok(())
 }
 
-/// Send encrypted ABORT signal
-pub async fn send_abort<W: AsyncWriteExt + Unpin>(writer: &mut W, key: &[u8; 32]) -> Result<()> {
-    let encrypted = encrypt(key, b"ABORT")?;
-    let len = encrypted.len() as u32;
-    writer.write_all(&len.to_be_bytes()).await?;
-    writer.write_all(&encrypted).await?;
-    writer.flush().await?;
-    Ok(())
+/// Send PROCEED signal.
+pub async fn send_proceed<W: AsyncWriteExt + Unpin>(writer: &mut W) -> Result<()> {
+    send_control_payload(writer, b"PROCEED").await
 }
 
-/// Send encrypted ACK signal
-pub async fn send_ack<W: AsyncWriteExt + Unpin>(writer: &mut W, key: &[u8; 32]) -> Result<()> {
-    let encrypted = encrypt(key, b"ACK")?;
-    let len = encrypted.len() as u32;
-    writer.write_all(&len.to_be_bytes()).await?;
-    writer.write_all(&encrypted).await?;
-    writer.flush().await?;
-    Ok(())
+/// Send ABORT signal.
+pub async fn send_abort<W: AsyncWriteExt + Unpin>(writer: &mut W) -> Result<()> {
+    send_control_payload(writer, b"ABORT").await
 }
 
-/// Send encrypted RESUME signal with byte offset
+/// Send ACK signal.
+pub async fn send_ack<W: AsyncWriteExt + Unpin>(writer: &mut W) -> Result<()> {
+    send_control_payload(writer, b"ACK").await
+}
+
+/// Send RESUME signal with byte offset.
 /// Format: "RESUME:" || offset(8 bytes BE)
-pub async fn send_resume<W: AsyncWriteExt + Unpin>(
-    writer: &mut W,
-    key: &[u8; 32],
-    offset: u64,
-) -> Result<()> {
+pub async fn send_resume<W: AsyncWriteExt + Unpin>(writer: &mut W, offset: u64) -> Result<()> {
     let mut payload = Vec::with_capacity(15); // "RESUME:" + 8 bytes
     payload.extend_from_slice(b"RESUME:");
     payload.extend_from_slice(&offset.to_be_bytes());
 
-    let encrypted = encrypt(key, &payload)?;
-    let len = encrypted.len() as u32;
-    writer.write_all(&len.to_be_bytes()).await?;
-    writer.write_all(&encrypted).await?;
-    writer.flush().await?;
-    Ok(())
+    send_control_payload(writer, &payload).await
 }
 
-/// Receive and decrypt a control signal
-pub async fn recv_control<R: AsyncReadExt + Unpin>(
-    reader: &mut R,
-    key: &[u8; 32],
-) -> Result<ControlSignal> {
+/// Receive a control signal.
+pub async fn recv_control<R: AsyncReadExt + Unpin>(reader: &mut R) -> Result<ControlSignal> {
     // Read length prefix
     let mut len_buf = [0u8; 4];
     reader
@@ -733,15 +595,12 @@ pub async fn recv_control<R: AsyncReadExt + Unpin>(
         );
     }
 
-    // Read encrypted data (safe to allocate after bounds check)
-    let mut encrypted = vec![0u8; len];
+    // Read data (safe to allocate after bounds check)
+    let mut data = vec![0u8; len];
     reader
-        .read_exact(&mut encrypted)
+        .read_exact(&mut data)
         .await
         .context("Failed to read control signal data")?;
-
-    // Decrypt and check plaintext
-    let data = decrypt(key, &encrypted).context("Failed to decrypt control signal")?;
 
     match data.as_slice() {
         b"PROCEED" => Ok(ControlSignal::Proceed),
@@ -757,7 +616,7 @@ pub async fn recv_control<R: AsyncReadExt + Unpin>(
     }
 }
 
-// WebRTC-specific control message format: [type(1)][len(4)][encrypted]
+// WebRTC-specific control message format: [type(1)][len(4)][payload]
 // Type: 2 = DONE, 3 = ACK, 4 = PROCEED, 5 = ABORT, 6 = RESUME
 const WEBRTC_MSG_TYPE_DONE: u8 = 2;
 const WEBRTC_MSG_TYPE_ACK: u8 = 3;
@@ -765,61 +624,56 @@ const WEBRTC_MSG_TYPE_PROCEED: u8 = 4;
 const WEBRTC_MSG_TYPE_ABORT: u8 = 5;
 const WEBRTC_MSG_TYPE_RESUME: u8 = 6;
 
-/// Create encrypted PROCEED message for WebRTC data channel
-pub fn make_webrtc_proceed_msg(key: &[u8; 32]) -> Result<Vec<u8>> {
-    let encrypted = encrypt(key, b"PROCEED")?;
-    let mut msg = vec![WEBRTC_MSG_TYPE_PROCEED];
-    msg.extend_from_slice(&(encrypted.len() as u32).to_be_bytes());
-    msg.extend_from_slice(&encrypted);
+fn make_webrtc_control_msg(msg_type: u8, payload: &[u8]) -> Result<Vec<u8>> {
+    if payload.len() > MAX_CONTROL_SIGNAL_SIZE {
+        anyhow::bail!(
+            "Control message too large: {} bytes (max {})",
+            payload.len(),
+            MAX_CONTROL_SIGNAL_SIZE
+        );
+    }
+
+    let mut msg = vec![msg_type];
+    msg.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+    msg.extend_from_slice(payload);
     Ok(msg)
 }
 
-/// Create encrypted ABORT message for WebRTC data channel
-pub fn make_webrtc_abort_msg(key: &[u8; 32]) -> Result<Vec<u8>> {
-    let encrypted = encrypt(key, b"ABORT")?;
-    let mut msg = vec![WEBRTC_MSG_TYPE_ABORT];
-    msg.extend_from_slice(&(encrypted.len() as u32).to_be_bytes());
-    msg.extend_from_slice(&encrypted);
-    Ok(msg)
+/// Create PROCEED message for WebRTC data channel.
+pub fn make_webrtc_proceed_msg() -> Result<Vec<u8>> {
+    make_webrtc_control_msg(WEBRTC_MSG_TYPE_PROCEED, b"PROCEED")
 }
 
-/// Create encrypted ACK message for WebRTC data channel
-pub fn make_webrtc_ack_msg(key: &[u8; 32]) -> Result<Vec<u8>> {
-    let encrypted = encrypt(key, b"ACK")?;
-    let mut msg = vec![WEBRTC_MSG_TYPE_ACK];
-    msg.extend_from_slice(&(encrypted.len() as u32).to_be_bytes());
-    msg.extend_from_slice(&encrypted);
-    Ok(msg)
+/// Create ABORT message for WebRTC data channel.
+pub fn make_webrtc_abort_msg() -> Result<Vec<u8>> {
+    make_webrtc_control_msg(WEBRTC_MSG_TYPE_ABORT, b"ABORT")
 }
 
-/// Create encrypted DONE message for WebRTC data channel
-pub fn make_webrtc_done_msg(key: &[u8; 32]) -> Result<Vec<u8>> {
-    let encrypted = encrypt(key, b"DONE")?;
-    let mut msg = vec![WEBRTC_MSG_TYPE_DONE];
-    msg.extend_from_slice(&(encrypted.len() as u32).to_be_bytes());
-    msg.extend_from_slice(&encrypted);
-    Ok(msg)
+/// Create ACK message for WebRTC data channel.
+pub fn make_webrtc_ack_msg() -> Result<Vec<u8>> {
+    make_webrtc_control_msg(WEBRTC_MSG_TYPE_ACK, b"ACK")
 }
 
-/// Create encrypted RESUME message for WebRTC data channel
+/// Create DONE message for WebRTC data channel.
+pub fn make_webrtc_done_msg() -> Result<Vec<u8>> {
+    make_webrtc_control_msg(WEBRTC_MSG_TYPE_DONE, b"DONE")
+}
+
+/// Create RESUME message for WebRTC data channel.
 /// Payload format: "RESUME:" || offset(8 bytes BE)
-pub fn make_webrtc_resume_msg(key: &[u8; 32], offset: u64) -> Result<Vec<u8>> {
+pub fn make_webrtc_resume_msg(offset: u64) -> Result<Vec<u8>> {
     let mut payload = Vec::with_capacity(15); // "RESUME:" + 8 bytes
     payload.extend_from_slice(b"RESUME:");
     payload.extend_from_slice(&offset.to_be_bytes());
 
-    let encrypted = encrypt(key, &payload)?;
-    let mut msg = vec![WEBRTC_MSG_TYPE_RESUME];
-    msg.extend_from_slice(&(encrypted.len() as u32).to_be_bytes());
-    msg.extend_from_slice(&encrypted);
-    Ok(msg)
+    make_webrtc_control_msg(WEBRTC_MSG_TYPE_RESUME, &payload)
 }
 
-/// Parse encrypted control message from WebRTC data channel
-/// Returns Some(signal) if the message type matches a control signal and decryption succeeds
+/// Parse a control message from WebRTC data channel.
+/// Returns Some(signal) if the message type matches a control signal.
 /// Returns None if the message type is not a control signal
-/// Returns Err if the message is malformed or decryption fails
-pub fn parse_webrtc_control_msg(data: &[u8], key: &[u8; 32]) -> Result<Option<ControlSignal>> {
+/// Returns Err if the message is malformed.
+pub fn parse_webrtc_control_msg(data: &[u8]) -> Result<Option<ControlSignal>> {
     if data.is_empty() {
         return Ok(None);
     }
@@ -836,22 +690,26 @@ pub fn parse_webrtc_control_msg(data: &[u8], key: &[u8; 32]) -> Result<Option<Co
         return Ok(None); // Not a control message
     }
 
-    // Parse message: [type(1)][len(4)][encrypted]
+    // Parse message: [type(1)][len(4)][payload]
     if data.len() < 5 {
         anyhow::bail!("Control message too short");
     }
 
-    let encrypted_len = u32::from_be_bytes([data[1], data[2], data[3], data[4]]) as usize;
-    if data.len() < 5 + encrypted_len {
+    let payload_len = u32::from_be_bytes([data[1], data[2], data[3], data[4]]) as usize;
+    if payload_len > MAX_CONTROL_SIGNAL_SIZE {
+        anyhow::bail!(
+            "Control message too large: {} bytes (max {})",
+            payload_len,
+            MAX_CONTROL_SIGNAL_SIZE
+        );
+    }
+    if data.len() < 5 + payload_len {
         anyhow::bail!("Control message truncated");
     }
 
-    let encrypted = &data[5..5 + encrypted_len];
+    let payload = &data[5..5 + payload_len];
 
-    // Decrypt and verify payload matches message type
-    let decrypted = decrypt(key, encrypted)?;
-
-    match (msg_type, decrypted.as_slice()) {
+    match (msg_type, payload) {
         (WEBRTC_MSG_TYPE_DONE, b"DONE") => Ok(Some(ControlSignal::Done)),
         (WEBRTC_MSG_TYPE_PROCEED, b"PROCEED") => Ok(Some(ControlSignal::Proceed)),
         (WEBRTC_MSG_TYPE_ABORT, b"ABORT") => Ok(Some(ControlSignal::Abort)),
@@ -941,9 +799,8 @@ pub enum ResumeResponse {
 /// Returns ResumeResponse indicating how to proceed.
 pub async fn handle_receiver_response<R: AsyncReadExt + Unpin>(
     reader: &mut R,
-    key: &[u8; 32],
 ) -> Result<ResumeResponse> {
-    match recv_control(reader, key).await? {
+    match recv_control(reader).await? {
         ControlSignal::Proceed => Ok(ResumeResponse::Fresh),
         ControlSignal::Resume(offset) => {
             let starting_chunk = offset / CHUNK_SIZE as u64 + 1;
@@ -962,11 +819,10 @@ pub async fn handle_receiver_response<R: AsyncReadExt + Unpin>(
 }
 
 /// Send file data starting from given offset.
-/// Handles chunk encryption, progress reporting.
+/// Handles chunk framing and progress reporting.
 pub async fn send_file_data<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
     file: &mut R,
     writer: &mut W,
-    key: &[u8; 32],
     file_size: u64,
     start_offset: u64,
     progress_interval: u64,
@@ -980,7 +836,7 @@ pub async fn send_file_data<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
         let to_read = std::cmp::min(CHUNK_SIZE, (file_size - bytes_sent) as usize);
         file.read_exact(&mut buffer[..to_read]).await?;
 
-        send_encrypted_chunk(writer, key, &buffer[..to_read]).await?;
+        send_chunk(writer, &buffer[..to_read]).await?;
 
         bytes_sent += to_read as u64;
         chunk_num += 1;
@@ -1111,11 +967,10 @@ pub fn prepare_file_receiver(
 }
 
 /// Receive file data and write to temp file.
-/// Handles chunk decryption, progress reporting, and metadata updates.
+/// Handles chunk framing, progress reporting, and metadata updates.
 pub async fn receive_file_data<R: AsyncReadExt + Unpin>(
     reader: &mut R,
     receiver: &mut FileReceiver,
-    key: &[u8; 32],
     file_size: u64,
     progress_interval: u64,
     metadata_update_interval: u64,
@@ -1130,9 +985,7 @@ pub async fn receive_file_data<R: AsyncReadExt + Unpin>(
     ))?;
 
     while receiver.bytes_received < file_size {
-        let chunk = recv_encrypted_chunk(reader, key)
-            .await
-            .context("Failed to receive chunk")?;
+        let chunk = recv_chunk(reader).await.context("Failed to receive chunk")?;
 
         // Write to temp file
         receiver
@@ -1308,10 +1161,10 @@ pub enum TransferResult {
     Aborted,
 }
 
-/// Unified sender transfer logic for all transports.
+/// Unified sender transfer logic for WebRTC streams.
 ///
 /// Handles the complete transfer flow:
-/// 1. Send encrypted header
+/// 1. Send header
 /// 2. Wait for receiver response (PROCEED/RESUME/ABORT)
 /// 3. Seek file if resuming
 /// 4. Send file data
@@ -1321,7 +1174,6 @@ pub enum TransferResult {
 /// # Arguments
 /// * `file` - File to send (must be seekable for resume support)
 /// * `stream` - Bidirectional stream for reading and writing
-/// * `key` - 32-byte encryption key
 /// * `header` - File header with metadata
 ///
 /// # Returns
@@ -1330,33 +1182,31 @@ pub enum TransferResult {
 pub async fn run_sender_transfer<S, F>(
     file: &mut F,
     stream: &mut S,
-    key: &[u8; 32],
     header: &FileHeader,
 ) -> Result<TransferResult>
 where
     S: AsyncReadExt + AsyncWriteExt + Unpin,
     F: AsyncReadExt + AsyncSeekExt + Unpin,
 {
-    run_sender_transfer_with_timeout(file, stream, key, header, None).await
+    run_sender_transfer_with_timeout(file, stream, header, None).await
 }
 
 /// Unified sender transfer logic with optional ACK timeout.
 ///
 /// Same as `run_sender_transfer` but allows specifying a timeout for ACK.
 /// If the timeout expires, the transfer is considered successful (data was sent).
-/// This is useful for unreliable transports like Tor where streams may close abruptly.
+/// If the timeout expires, the data was already sent and the transfer is
+/// considered successful.
 ///
 /// # Arguments
 /// * `file` - File to send (must be seekable for resume support)
 /// * `stream` - Bidirectional stream for reading and writing
-/// * `key` - 32-byte encryption key
 /// * `header` - File header with metadata
 /// * `ack_timeout` - Optional timeout for waiting for ACK. If None, waits indefinitely.
 ///   If timeout expires, considers transfer successful.
 pub async fn run_sender_transfer_with_timeout<S, F>(
     file: &mut F,
     stream: &mut S,
-    key: &[u8; 32],
     header: &FileHeader,
     ack_timeout: Option<std::time::Duration>,
 ) -> Result<TransferResult>
@@ -1364,14 +1214,14 @@ where
     S: AsyncReadExt + AsyncWriteExt + Unpin,
     F: AsyncReadExt + AsyncSeekExt + Unpin,
 {
-    // 1. Send encrypted header
-    send_encrypted_header(stream, key, header)
+    // 1. Send header
+    send_header(stream, header)
         .await
         .context("Failed to send header")?;
 
     // 2. Wait for receiver response
     ui::sink().status("Waiting for receiver to confirm...");
-    let start_offset = match handle_receiver_response(stream, key).await? {
+    let start_offset = match handle_receiver_response(stream).await? {
         ResumeResponse::Fresh => {
             ui::sink().status("Receiver ready, starting transfer...");
             0
@@ -1388,7 +1238,7 @@ where
     };
 
     // 3. Send file data
-    send_file_data(file, stream, key, header.file_size, start_offset, 10).await?;
+    send_file_data(file, stream, header.file_size, start_offset, 10).await?;
 
     // 4. Flush stream (important for TCP-based transports)
     stream.flush().await.context("Failed to flush stream")?;
@@ -1400,7 +1250,7 @@ where
 
     let ack_result = match ack_timeout {
         Some(timeout) => {
-            match tokio::time::timeout(timeout, recv_control(stream, key)).await {
+            match tokio::time::timeout(timeout, recv_control(stream)).await {
                 Ok(result) => result,
                 Err(_) => {
                     // Timeout - consider transfer successful (data was sent)
@@ -1409,7 +1259,7 @@ where
                 }
             }
         }
-        None => recv_control(stream, key).await,
+        None => recv_control(stream).await,
     };
 
     match ack_result {
@@ -1435,10 +1285,10 @@ use crate::core::folder::{
     print_skipped_entries, print_tar_extraction_info,
 };
 
-/// Unified receiver transfer logic for all transports.
+/// Unified receiver transfer logic for WebRTC streams.
 ///
 /// Handles the complete transfer flow:
-/// 1. Receive encrypted header
+/// 1. Receive header
 /// 2. Handle file existence check (for files)
 /// 3. Prepare receiver and send control signal
 /// 4. Receive file/folder data
@@ -1447,17 +1297,13 @@ use crate::core::folder::{
 ///
 /// # Arguments
 /// * `stream` - Bidirectional stream for reading and writing
-/// * `key` - 32-byte encryption key
 /// * `output_dir` - Optional output directory (defaults to current directory)
 /// * `no_resume` - If true, disable resume support
 ///
 /// # Returns
-/// * Tuple of (path to received file/directory, stream for cleanup)
-///   The stream is returned so callers can perform transport-specific cleanup
-///   (e.g., QUIC stream finish).
+/// * Tuple of (path to received file/directory, stream for WebRTC cleanup)
 pub async fn run_receiver_transfer<S>(
     stream: S,
-    key: [u8; 32],
     output_dir: Option<PathBuf>,
     no_resume: bool,
 ) -> Result<(PathBuf, S)>
@@ -1468,7 +1314,7 @@ where
     let mut stream = stream;
 
     // 1. Receive header
-    let header = recv_encrypted_header(&mut stream, &key)
+    let header = recv_header(&mut stream)
         .await
         .context("Failed to read header")?;
 
@@ -1484,12 +1330,11 @@ where
     let (final_path, stream) = match header.transfer_type {
         TransferType::File => {
             let path =
-                receive_file_transfer_impl(&mut stream, &key, &header, &output_dir, no_resume)
-                    .await?;
+                receive_file_transfer_impl(&mut stream, &header, &output_dir, no_resume).await?;
             (path, stream)
         }
         TransferType::Folder => {
-            receive_folder_transfer_impl(stream, &key, &header, &output_dir).await?
+            receive_folder_transfer_impl(stream, &header, &output_dir).await?
         }
     };
 
@@ -1499,7 +1344,6 @@ where
 /// Internal implementation for file transfer reception.
 async fn receive_file_transfer_impl<S>(
     stream: &mut S,
-    key: &[u8; 32],
     header: &FileHeader,
     output_dir: &Path,
     no_resume: bool,
@@ -1539,7 +1383,7 @@ where
             }
             FileExistsChoice::Cancel => {
                 // Send abort signal to sender
-                send_abort(stream, key)
+                send_abort(stream)
                     .await
                     .context("Failed to send abort signal")?;
                 anyhow::bail!("Transfer cancelled by user");
@@ -1560,13 +1404,13 @@ where
     // Send control signal
     match &control_signal {
         ControlSignal::Proceed => {
-            send_proceed(stream, key)
+            send_proceed(stream)
                 .await
                 .context("Failed to send proceed signal")?;
             ui::sink().status("Ready to receive data...");
         }
         ControlSignal::Resume(offset) => {
-            send_resume(stream, key, *offset)
+            send_resume(stream, *offset)
                 .await
                 .context("Failed to send resume signal")?;
             ui::sink().status(&format_resume_progress(*offset, header.file_size));
@@ -1579,7 +1423,7 @@ where
 
     // Receive file data with interrupt handling
     tokio::select! {
-        result = receive_file_data(stream, &mut receiver, key, header.file_size, 10, 100) => {
+        result = receive_file_data(stream, &mut receiver, header.file_size, 10, 100) => {
             result?;
         }
         _ = cleanup_handler.shutdown_rx => {
@@ -1596,7 +1440,7 @@ where
     ui::sink().status(&format!("Saved to: {}", final_output_path.display()));
 
     // Send ACK
-    send_ack(stream, key)
+    send_ack(stream)
         .await
         .context("Failed to send acknowledgment")?;
 
@@ -1607,7 +1451,6 @@ where
 /// Returns (path, stream) so callers can perform transport-specific cleanup.
 async fn receive_folder_transfer_impl<S>(
     mut stream: S,
-    key: &[u8; 32],
     header: &FileHeader,
     output_dir: &Path,
 ) -> Result<(PathBuf, S)>
@@ -1621,7 +1464,7 @@ where
     ));
 
     // Folders are not resumable, always send proceed
-    send_proceed(&mut stream, key)
+    send_proceed(&mut stream)
         .await
         .context("Failed to send proceed signal")?;
     ui::sink().status("Ready to receive data...");
@@ -1640,7 +1483,7 @@ where
     let runtime_handle = tokio::runtime::Handle::current();
 
     // Create streaming reader that feeds tar extractor
-    let reader = StreamingReader::new(stream, *key, header.file_size, runtime_handle);
+    let reader = StreamingReader::new(stream, header.file_size, runtime_handle);
 
     // Run tar extraction in blocking context with interrupt handling
     let extract_dir_clone = extract_dir.clone();
@@ -1671,7 +1514,7 @@ where
     let mut stream = streaming_reader
         .into_inner()
         .context("Transfer validation failed")?;
-    send_ack(&mut stream, key)
+    send_ack(&mut stream)
         .await
         .context("Failed to send acknowledgment")?;
 

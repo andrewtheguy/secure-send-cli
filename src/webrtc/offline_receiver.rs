@@ -141,15 +141,8 @@ pub async fn receive_file_offline(
         eprintln!("   Local: {} -> Remote: {}", local, remote);
     }
 
-    // Extract encryption key from offer
-    let key_bytes = hex::decode(&offer.transfer_info.encryption_key)
-        .context("Failed to decode encryption key")?;
-    let key: [u8; 32] = key_bytes
-        .try_into()
-        .map_err(|_| anyhow::anyhow!("Invalid encryption key length"))?;
-
     // Use common transfer protocol
-    let (_, stream) = run_receiver_transfer(stream, key, output_dir, no_resume).await?;
+    let (_, stream) = run_receiver_transfer(stream, output_dir, no_resume).await?;
 
     // Wait for sender to close the connection (confirms ACK was received)
     // This ensures the ACK is delivered before we close our side

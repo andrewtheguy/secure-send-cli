@@ -3,35 +3,6 @@
 //! This module provides signaling for WebRTC connections without any servers.
 //! Users manually copy and paste JSON between sender and receiver to establish
 //! the connection. This is useful for direct LAN transfers without internet.
-//!
-//! # Security Model
-//!
-//! **Important**: In offline mode, the encryption key is included in the offer
-//! payload that users copy and paste. This is a deliberate trade-off for
-//! serverless operation:
-//!
-//! - **Benefit**: No servers required - works in fully air-gapped environments
-//! - **Trade-off**: The signaling channel must be trusted, as it carries the key
-//!
-//! ## Threat Model
-//!
-//! The encryption protects data **in transit over the WebRTC connection**, but
-//! an attacker who can intercept the signaling payload can also decrypt the
-//! transfer. This includes:
-//!
-//! - Clipboard snooping malware
-//! - Shoulder surfing during copy/paste
-//! - Insecure intermediary services (chat apps, email) used to exchange codes
-//! - Screen recording or screenshots
-//!
-//! ## Recommendations
-//!
-//! - Exchange codes through a trusted, private channel (in-person, encrypted chat)
-//! - Avoid pasting codes into untrusted applications or services
-//!
-//! The same trust assumption applies to the Nostr-based beam code, which also
-//! embeds the encryption key — the difference is only that signaling travels
-//! over relays instead of a manual copy/paste channel.
 
 use anyhow::{Context, Result};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -71,21 +42,11 @@ fn current_timestamp() -> u64 {
 // ============================================================================
 
 /// Transfer information included in the offer.
-///
-/// # Security Note
-///
-/// The `encryption_key` is transmitted in the offer payload. See module-level
-/// documentation for the security implications of this design.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TransferInfo {
     pub filename: String,
     pub file_size: u64,
     pub transfer_type: String, // "file" or "folder"
-    /// Encryption key (hex-encoded 32 bytes).
-    ///
-    /// **Security**: This key travels through the signaling channel.
-    /// The signaling channel must be trusted. See module docs.
-    pub encryption_key: String,
 }
 
 /// Offline offer containing SDP, ICE candidates, and transfer info
@@ -170,10 +131,6 @@ pub fn display_offer_json(offer: &OfflineOffer) -> Result<()> {
     println!("=== SENDER STEP 2: Press Enter to show the offer code ===");
     std::io::stdout().flush()?;
     std::io::stdin().read_line(&mut String::new())?;
-    println!();
-    println!("WARNING: The code below contains the encryption key.");
-    println!("         Only share it through secure channels (e.g., SSH session,");
-    println!("         remote desktop, or encrypted chat).");
     println!();
     println!("{}", OFFER_BEGIN_MARKER);
     println!("{}", wrapped);
