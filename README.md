@@ -7,13 +7,6 @@ A secure, cross-platform, single-binary peer-to-peer file transfer tool built on
 
 ## Features
 
-- **End-to-end encryption** - WebRTC data channels encrypt transfers with DTLS
-- **WebRTC data channels** - Direct peer-to-peer connectivity with STUN-based NAT traversal
-- **Nostr signaling** - Online connection setup via Nostr relays (with relay auto-discovery)
-- **Manual signaling** - Offline copy/paste offer/answer exchange when relays are unavailable
-- **Resumable file transfers** - Interrupted file downloads can resume from where they left off
-- **File and folder transfers** - Send individual files or entire directories (automatically archived)
-- **Cross-platform** - Standalone binary for macOS, Linux, and Windows
 
 ## Installation
 
@@ -123,17 +116,6 @@ For protocol details and wire formats, see [ARCHITECTURE.md](docs/ARCHITECTURE.m
 
 ## Security
 
-xfer-webrtc relies on WebRTC data channel encryption. Nostr and manual
-signaling exchange only connection setup metadata; file bytes flow directly
-peer-to-peer over DTLS.
-
-| Signaling | Transfer Encryption | Signaling Payload |
-|-----------|---------------------|-------------------|
-| Nostr (online) | DTLS (WebRTC) | Transfer ID, sender pubkey, relays, file metadata |
-| Manual (offline) | DTLS (WebRTC) | SDP, ICE candidates, file metadata |
-
-Nostr relays are used only for signaling and never see file content. Media flows
-directly peer-to-peer over the WebRTC data channel.
 
 For the detailed security model, see [ARCHITECTURE.md](docs/ARCHITECTURE.md#security-model).
 
