@@ -191,7 +191,7 @@ cache, so a valid code or offer can be reused any number of times within the
 TTL.
 
 **Implementation:**
-- **Token Version**: v6 tokens include a `created_at` Unix timestamp
+- **Token Version**: v6 tokens carry the transfer ID, sender public key, a random 128-bit PSK (hex-encoded), relay URLs, file metadata (transfer type and filename), and a `created_at` Unix timestamp (see [Online WebRTC Mode](#online-webrtc-mode-xfer-webrtc-send))
 - **TTL Duration**: 60 minutes (`SESSION_TTL_SECS = 3600`)
 - **Clock Skew**: Allows up to 60 seconds into the future to handle minor clock drift
 
