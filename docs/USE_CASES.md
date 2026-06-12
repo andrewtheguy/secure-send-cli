@@ -20,7 +20,8 @@ exchanging IP addresses manually.
   ```
 - **Experience**: Share the printed xfer code via any channel (chat, paper,
   verbal). The Nostr relays only carry signaling; file bytes flow directly
-  peer-to-peer.
+  peer-to-peer. If the sender cannot complete online signaling, it prompts to
+  fall back to manual copy-paste signaling for the same transfer.
 
 ---
 
@@ -29,16 +30,16 @@ exchanging IP addresses manually.
 internet, or relays blocked), but both machines can still reach each other
 directly over a LAN or routed private/VPN network.
 
-**Solution**: **Manual Mode** (`send --manual` / `receive`)
+**Solution**: **Manual Mode** (`send --manual` on the sender, plain `receive`
+on the receiver)
 - **Why**: Signaling is exchanged by copy-paste instead of through a relay, so no
   relay or third-party signaling service is required. The data channel is still a
   direct peer-to-peer WebRTC connection.
-- **Note**: Manual mode only removes *relay signaling*. The peers are still
-  created with public STUN servers (`WebRtcPeer::new()`), so ICE will attempt to
-  contact them for reflexive candidates if the network allows it. For a true
-  air-gapped/LAN-only setup with no outbound STUN traffic, a no-STUN peer
-  constructor (`WebRtcPeer::new_offline()`) exists but is not currently wired
-  into the manual commands.
+- **Note**: Manual mode only removes *relay signaling*. The CLI still creates
+  peers with public STUN servers, so ICE will attempt to contact them for
+  reflexive candidates if the network allows it. If outbound STUN is blocked,
+  direct host candidates may still work on reachable LAN/private networks, but
+  there is currently no CLI option that disables STUN.
 - **Command**:
   ```bash
   # Sender
@@ -47,8 +48,8 @@ directly over a LAN or routed private/VPN network.
   # Receiver (paste the manual offer; the mode is detected automatically)
   xfer-webrtc receive
   ```
-- **Experience**: The sender prints an offer code; the receiver pastes it into
-  `receive` (which auto-detects manual mode) and replies with an answer code. The
+- **Experience**: The sender prints an offer code; the receiver runs plain
+  `xfer-webrtc receive`, pastes the offer, and replies with an answer code. The
   exchanged text includes signaling metadata needed to establish the WebRTC
   data channel.
 

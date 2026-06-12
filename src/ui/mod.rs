@@ -1,14 +1,8 @@
 //! User-interface output abstraction shared across all xfer transports.
 //!
-//! Historically the transfer code wrote status, progress, and prompts directly
-//! with `eprintln!`/`println!` and blocking `stdin` reads. That hard-coded a
-//! plain-text CLI and made a richer UI (e.g. an inline TUI) impossible.
-//!
-//! This module introduces a [`UiSink`] trait that the transfer code dispatches
-//! to instead. A process installs exactly one sink via [`install`]; until then
-//! (and for transports that never install one), [`sink`] returns the default
-//! [`PlainSink`], which reproduces the original plain-text behaviour byte for
-//! byte.
+//! Transfer code dispatches status, progress, and prompts through [`UiSink`].
+//! A process installs exactly one sink via [`install`]; until then, [`sink`]
+//! returns the default [`PlainSink`] for plain-text CLI output.
 
 use anyhow::{Result, anyhow};
 use std::io::Write;
@@ -167,9 +161,7 @@ impl UiSink for PlainSink {
         let size_str = format_bytes(size);
         println!("\n⚠️  Warning: {} is large ({}).", name, size_str);
         println!("Folder transfers are NOT resumable. If interrupted, you must start over.");
-        println!(
-            "Large folders are recommended for local connections only (xfer send --local-only)."
-        );
+        println!("For large folders, prefer a stable local/private network path.");
         print!("Continue anyway? [y/N]: ");
         std::io::stdout().flush()?;
 

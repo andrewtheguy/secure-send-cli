@@ -1,12 +1,11 @@
 //! Nostr-based WebRTC signaling for webrtc transport
 //!
-//! This module provides WebRTC signaling via Nostr events, replacing the PeerJS
-//! WebSocket signaling server. It enables decentralized peer discovery and
-//! connection establishment using Nostr relays.
+//! This module provides WebRTC signaling via Nostr events. It carries encrypted
+//! SDP offer/answer payloads and bundled ICE candidates over Nostr relays.
 //!
 //! Event structure (reuses kind 24242):
-//! - type="webrtc-offer": SDP offer from sender
-//! - type="webrtc-answer": SDP answer from receiver
+//! - type="webrtc-offer": SDP offer from receiver to sender
+//! - type="webrtc-answer": SDP answer from sender to receiver
 
 use anyhow::{Context, Result};
 use base64::{Engine, engine::general_purpose::STANDARD};
