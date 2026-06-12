@@ -4115,6 +4115,7 @@ dependencies = [
  "nostr-sdk",
  "rand 0.9.4",
  "reqwest",
+ "rustls",
  "rustyline",
  "serde",
  "serde_json",

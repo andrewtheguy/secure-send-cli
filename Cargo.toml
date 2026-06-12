@@ -23,6 +23,7 @@ hex = "0.4"
 rand = "0.9"
 futures = "0.3"
 log = "0.4"
+rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs"] }
 
 # File handling
 tempfile = "3"
