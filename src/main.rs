@@ -66,6 +66,8 @@ enum Commands {
 }
 
 fn main() {
+    rustls::crypto::aws_lc_rs::default_provider().install_default().expect("Failed to install Rustls crypto provider");
+
     // Run the async main and handle errors
     let result = tokio::runtime::Builder::new_multi_thread()
         .enable_all()

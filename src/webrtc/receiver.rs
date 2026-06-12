@@ -11,6 +11,7 @@ use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 use crate::core::xfer::parse_code;
 use crate::core::transfer::run_receiver_transfer;
 
+use crate::signaling::crypto::PSK_LEN;
 use crate::signaling::nostr::{NostrSignaling, SignalingMessage, create_receiver_signaling};
 use crate::signaling::offline::ice_candidates_to_payloads;
 use crate::webrtc::common::{DataChannelStream, WebRtcPeer};
@@ -73,7 +74,22 @@ async fn try_webrtc_receive(
     let answer_result: Result<()> = timeout(WEBRTC_CONNECTION_TIMEOUT, async {
         loop {
             match signal_rx.recv().await {
-                Some(SignalingMessage::Answer { sdp, .. }) => {
+                Some(SignalingMessage::Answer {
+                    sender_pubkey: answer_pubkey,
+                    sdp,
+                }) => {
+                    // Authenticate the answer: it must be signed by the sender
+                    // identified in the xfer code. Anyone who learns the transfer
+                    // ID and receiver pubkey via relay signaling could otherwise
+                    // race a forged answer.
+                    if &answer_pubkey != sender_pubkey {
+                        log::warn!(
+                            "Ignoring answer from unexpected pubkey {} (expected {})",
+                            answer_pubkey.to_hex(),
+                            sender_pubkey.to_hex()
+                        );
+                        continue;
+                    }
                     eprintln!("Received answer from sender");
                     let answer_sdp = RTCSessionDescription::answer(sdp.sdp)
                         .context("Failed to create answer SDP")?;
@@ -198,11 +214,20 @@ pub async fn receive_webrtc(
         .parse()
         .context("Failed to parse sender public key")?;
 
+    // Decode the shared pre-shared key used to seal/open signaling payloads.
+    let psk: [u8; PSK_LEN] = {
+        let bytes = hex::decode(&token.psk).context("Failed to decode psk from xfer code")?;
+        bytes
+            .as_slice()
+            .try_into()
+            .context("Invalid psk length in xfer code")?
+    };
+
     eprintln!("Connecting to sender: {}", sender_pubkey_hex);
 
     // Create Nostr signaling client
     eprintln!("Connecting to Nostr relays for signaling...");
-    let signaling = create_receiver_signaling(&transfer_id, relays.clone()).await?;
+    let signaling = create_receiver_signaling(&transfer_id, relays.clone(), psk).await?;
 
     eprintln!("Receiver pubkey: {}", signaling.public_key().to_hex());
 
