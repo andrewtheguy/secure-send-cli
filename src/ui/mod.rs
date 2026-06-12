@@ -24,7 +24,7 @@ pub enum Direction {
 /// region; [`PlainSink`] ignores it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Phase {
-    /// Preparing the file/archive (checksum, tar creation).
+    /// Preparing the file (checksum).
     Preparing,
     /// Sender is waiting for a receiver to connect.
     Waiting,
@@ -57,7 +57,6 @@ pub struct Progress {
 /// Sink for all user-facing output produced during a transfer.
 ///
 /// Methods that take input ([`prompt_file_exists`](UiSink::prompt_file_exists),
-/// [`confirm_large_folder`](UiSink::confirm_large_folder),
 /// [`prompt_line`](UiSink::prompt_line)) are synchronous and may block; callers
 /// already invoke them from `tokio::task::spawn_blocking`.
 pub trait UiSink: Send + Sync {
@@ -81,10 +80,6 @@ pub trait UiSink: Send + Sync {
 
     /// Ask the user how to handle an existing destination file.
     fn prompt_file_exists(&self, path: &Path) -> Result<FileExistsChoice>;
-
-    /// Confirm sending a large (non-resumable) folder archive.
-    /// `size` is the archive size in bytes, `name` its filename.
-    fn confirm_large_folder(&self, size: u64, name: &str) -> Result<bool>;
 
     /// Read a line of input from the user. `initial` pre-fills the editable
     /// buffer (empty for a fresh prompt).
@@ -155,19 +150,6 @@ impl UiSink for PlainSink {
             "r" | "rename" => Ok(FileExistsChoice::Rename),
             _ => Ok(FileExistsChoice::Cancel),
         }
-    }
-
-    fn confirm_large_folder(&self, size: u64, name: &str) -> Result<bool> {
-        let size_str = format_bytes(size);
-        println!("\n⚠️  Warning: {} is large ({}).", name, size_str);
-        println!("Folder transfers are NOT resumable. If interrupted, you must start over.");
-        println!("For large folders, prefer a stable local/private network path.");
-        print!("Continue anyway? [y/N]: ");
-        std::io::stdout().flush()?;
-
-        let mut input = String::new();
-        std::io::stdin().read_line(&mut input)?;
-        Ok(input.trim().eq_ignore_ascii_case("y"))
     }
 
     fn prompt_line(&self, prompt: &str, initial: &str) -> Result<String> {

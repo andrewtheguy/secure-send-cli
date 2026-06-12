@@ -47,7 +47,6 @@ fn current_timestamp() -> u64 {
 pub struct TransferInfo {
     pub filename: String,
     pub file_size: u64,
-    pub transfer_type: String, // "file" or "folder"
 }
 
 /// Offline offer containing SDP, ICE candidates, and transfer info

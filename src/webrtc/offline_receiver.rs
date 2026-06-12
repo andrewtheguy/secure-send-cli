@@ -41,7 +41,6 @@ pub async fn receive_file_offline(
         transfer_info.filename,
         format_bytes(transfer_info.file_size)
     );
-    eprintln!("Transfer type: {}", transfer_info.transfer_type);
 
     // Create WebRTC peer with STUN for NAT traversal
     let mut rtc_peer = WebRtcPeer::new().await?;

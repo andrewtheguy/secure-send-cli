@@ -183,7 +183,7 @@ cache, so a valid code or offer can be reused any number of times within the
 TTL.
 
 **Implementation:**
-- **Token Version**: v6 tokens carry the transfer ID, sender public key, a random 128-bit PSK (hex-encoded), relay URLs, file metadata (transfer type and filename), and a `created_at` Unix timestamp (see [Online WebRTC Mode](#online-webrtc-mode-xfer-webrtc-send))
+- **Token Version**: v6 tokens carry the transfer ID, sender public key, a random 128-bit PSK (hex-encoded), relay URLs, the filename, and a `created_at` Unix timestamp (see [Online WebRTC Mode](#online-webrtc-mode-xfer-webrtc-send))
 - **TTL Duration**: 60 minutes (`SESSION_TTL_SECS = 3600`)
 - **Clock Skew**: Allows up to 60 seconds into the future to handle minor clock drift
 
@@ -222,7 +222,7 @@ Control signals are sent over the same length-prefixed framing as data:
 
 ### Resumable File On-Disk Flow
 
-Resumable state is only used for **file** transfers (not folders) when resume is enabled.
+Resumable state is used when resume is enabled.
 
 - Receiver writes incoming bytes to a resume temp file in the target directory:
   `<final_path>.xfer.partial`
@@ -244,19 +244,18 @@ is on the same filesystem, which enables atomic replacement semantics.
 
 Before data transfer begins, the receiver validates the incoming transfer:
 
-1. **Sender** sends file header containing filename, size, and transfer type
+1. **Sender** sends a file header containing the filename, size, and checksum
 2. **Receiver** checks:
-   - For file transfers, whether the destination file already exists
-   - For file transfers, whether a matching resume temp file exists
+   - Whether the destination file already exists
+   - Whether a matching resume temp file exists
    - Whether the user wants to overwrite, rename, or cancel an existing file
-   - Whether a file transfer can resume automatically from a matching partial
-   - For folder transfers, which extraction directory to create/use
+   - Whether the transfer can resume automatically from a matching partial
 3. **Receiver** responds with:
    - **PROCEED**: Accept transfer, sender begins sending data chunks
    - **RESUME**: Resume a file transfer from the requested byte offset
    - **ABORT**: Decline transfer, connection is closed
 
 This handshake prevents:
-- Accidental file overwrites without user consent for file transfers
+- Accidental file overwrites without user consent
 - Wasted bandwidth on declined transfers
 - Sender continuing after receiver has disconnected

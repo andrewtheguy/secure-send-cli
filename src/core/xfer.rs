@@ -28,8 +28,6 @@ pub struct XferToken {
     pub transfer_id: String,
     /// List of Nostr relay URLs for signaling
     pub relays: Vec<String>,
-    /// Transfer type: "file" or "folder"
-    pub transfer_type: String,
     /// Original filename.
     pub filename: String,
 }
@@ -51,27 +49,13 @@ pub fn current_timestamp() -> u64 {
 /// * `transfer_id` - Unique transfer session ID
 /// * `relays` - List of Nostr relay URLs for signaling
 /// * `filename` - Original filename
-/// * `transfer_type` - "file" or "folder"
-///
-/// # Errors
-///
-/// Returns an error if `transfer_type` is not "file" or "folder".
 pub fn generate_webrtc_code(
     sender_pubkey: String,
     psk: String,
     transfer_id: String,
     relays: Vec<String>,
     filename: String,
-    transfer_type: &str,
 ) -> Result<String> {
-    // Validate transfer_type early to fail fast
-    if transfer_type != "file" && transfer_type != "folder" {
-        anyhow::bail!(
-            "Invalid transfer_type: '{}' (expected 'file' or 'folder')",
-            transfer_type
-        );
-    }
-
     // Validate sender_pubkey format (Nostr x-only Schnorr pubkey: 32 bytes = 64 hex chars)
     if sender_pubkey.len() != 64 || !sender_pubkey.chars().all(|c| c.is_ascii_hexdigit()) {
         anyhow::bail!(
@@ -123,7 +107,6 @@ pub fn generate_webrtc_code(
         psk,
         transfer_id,
         relays,
-        transfer_type: transfer_type.to_string(),
         filename,
     };
 
@@ -236,15 +219,6 @@ pub fn parse_code(code: &str) -> Result<XferToken> {
             );
         }
     }
-    match token.transfer_type.as_str() {
-        "file" | "folder" => {}
-        invalid => {
-            anyhow::bail!(
-                "Invalid token: unsupported transfer type '{}' (expected 'file' or 'folder')",
-                invalid
-            );
-        }
-    }
 
     Ok(token)
 }
@@ -268,7 +242,6 @@ mod tests {
             "082962d8cde95b80a2813e002d79cc1d".to_string(),
             vec!["wss://relay.example.com".to_string()],
             "test.bin".to_string(),
-            "file",
         )
         .unwrap();
 
@@ -288,7 +261,6 @@ mod tests {
             "082962d8cde95b80a2813e002d79cc1d".to_string(),
             vec!["wss://relay.example.com".to_string()],
             "test.bin".to_string(),
-            "file",
         )
         .unwrap_err();
         assert!(err.to_string().contains("psk"));
@@ -303,7 +275,6 @@ mod tests {
             "082962d8cde95b80a2813e002d79cc1d".to_string(),
             vec!["wss://relay.example.com".to_string()],
             "test.bin".to_string(),
-            "file",
         )
         .unwrap();
 

@@ -12,7 +12,6 @@ A secure, cross-platform, single-binary peer-to-peer file transfer tool built on
 - **Single static binary** — one native executable per platform, no runtime, package manager, or dependencies to install.
 - **Cross-platform** — Linux, macOS, and Windows.
 - **Two signaling modes** — online via auto-discovered Nostr relays, or manual copy-paste signaling that needs no relay or third-party signaling service (note: peers still attempt public STUN servers for NAT traversal unless the network blocks them).
-- **Files and folders** — folders are auto-detected and archived (tar) before transfer.
 - **Resumable transfers** — interrupted file transfers can resume from where they stopped, using a non-cryptographic xxHash64 checksum to match the partial data against the original file.
 - **NAT traversal** — STUN-based ICE negotiation establishes a direct connection across most networks.
 - **Staleness protection** — xfer codes and manual offers carry a timestamp and expire after a TTL.
@@ -73,9 +72,6 @@ unless you specify custom Nostr relay URLs.
 # Send a file
 xfer-webrtc send /path/to/file
 
-# Send a folder (auto-detected and archived)
-xfer-webrtc send /path/to/folder
-
 # Use the built-in default relays instead of auto-discovery
 xfer-webrtc send --default-relays /path/to/file
 
@@ -127,7 +123,6 @@ automatically. There is no separate `receive --manual` flag.
 
 - **Send over the internet without exchanging IPs** — use the default online mode; Nostr relays handle signaling while the file flows directly peer-to-peer.
 - **No internet or relays blocked** — use `send --manual` on the sender and plain `receive` on the receiver to exchange signaling by copy-paste over a LAN or routed private/VPN network.
-- **Send a whole directory** — pass a folder path; it is auto-detected and archived before transfer.
 
 See [USE_CASES.md](docs/USE_CASES.md) for detailed scenarios.
 

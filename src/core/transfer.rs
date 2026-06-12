@@ -2,11 +2,9 @@ use anyhow::{Context, Result};
 use std::future::Future;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use tempfile::NamedTempFile;
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use crate::core::folder::{create_tar_archive, print_tar_creation_info};
 use crate::core::resume::calculate_file_checksum;
 use crate::ui::{self, Direction, Progress};
 
@@ -32,19 +30,6 @@ pub fn is_interrupted(err: &anyhow::Error) -> bool {
     err.downcast_ref::<Interrupted>().is_some()
 }
 
-/// Check if a path contains traversal patterns.
-///
-/// Returns `true` if the path contains dangerous patterns like:
-/// - Starts with ".." (e.g., "../etc/passwd")
-/// - Contains "/.." (e.g., "foo/../bar")
-/// - Contains "\\.." (Windows path traversal)
-///
-/// Allows legitimate names like "file..txt" or "archive..tar.gz".
-/// Use this for paths that may legitimately contain separators (e.g., tar entries).
-pub fn contains_path_traversal(path: &str) -> bool {
-    path.starts_with("..") || path.contains("/..") || path.contains("\\..")
-}
-
 /// Check if a filename contains invalid characters.
 ///
 /// Returns `true` if the name contains:
@@ -52,51 +37,23 @@ pub fn contains_path_traversal(path: &str) -> bool {
 /// - Path separators (`/` or `\`)
 /// - Null bytes
 ///
-/// Use this for single-component names (filenames, folder names).
+/// Use this for single-component names (filenames).
 pub fn is_invalid_filename(name: &str) -> bool {
     name.starts_with("..") || name.contains('/') || name.contains('\\') || name.contains('\0')
 }
 
-/// Soft limit for large file transfers (100MB)
-pub const LARGE_FILE_THRESHOLD: u64 = 100 * 1024 * 1024;
-
-/// Transfer type identifier
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(u8)]
-pub enum TransferType {
-    File = 0,
-    Folder = 1, // Tar archive
-}
-
-impl TransferType {
-    pub fn from_u8(value: u8) -> Result<Self> {
-        match value {
-            0 => Ok(TransferType::File),
-            1 => Ok(TransferType::Folder),
-            _ => anyhow::bail!("Unknown transfer type: {}", value),
-        }
-    }
-}
-
 /// Transfer protocol header
-/// Format: transfer_type (1 byte) || filename_len (2 bytes) || filename || file_size (8 bytes) || checksum (8 bytes)
+/// Format: filename_len (2 bytes) || filename || file_size (8 bytes) || checksum (8 bytes)
 pub struct FileHeader {
-    pub transfer_type: TransferType,
     pub filename: String,
     pub file_size: u64,
-    /// xxhash64 checksum of the file (0 for folders)
+    /// xxhash64 checksum of the file
     pub checksum: u64,
 }
 
 impl FileHeader {
-    pub fn new(
-        transfer_type: TransferType,
-        filename: String,
-        file_size: u64,
-        checksum: u64,
-    ) -> Self {
+    pub fn new(filename: String, file_size: u64, checksum: u64) -> Self {
         Self {
-            transfer_type,
             filename,
             file_size,
             checksum,
@@ -104,7 +61,7 @@ impl FileHeader {
     }
 
     /// Serialize header for transmission
-    /// Format: transfer_type (1 byte) || filename_len (2 bytes) || filename || file_size (8 bytes) || checksum (8 bytes)
+    /// Format: filename_len (2 bytes) || filename || file_size (8 bytes) || checksum (8 bytes)
     ///
     /// Returns an error if the filename exceeds the protocol limit (65535 bytes).
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
@@ -116,9 +73,8 @@ impl FileHeader {
                 u16::MAX
             );
         }
-        let mut bytes = Vec::with_capacity(1 + 2 + filename_bytes.len() + 8 + 8);
+        let mut bytes = Vec::with_capacity(2 + filename_bytes.len() + 8 + 8);
 
-        bytes.push(self.transfer_type as u8);
         bytes.extend_from_slice(&(filename_bytes.len() as u16).to_be_bytes());
         bytes.extend_from_slice(filename_bytes);
         bytes.extend_from_slice(&self.file_size.to_be_bytes());
@@ -129,18 +85,17 @@ impl FileHeader {
 
     /// Deserialize header from bytes
     pub fn from_bytes(data: &[u8]) -> Result<Self> {
-        if data.len() < 3 {
+        if data.len() < 2 {
             anyhow::bail!("Header data too short");
         }
 
-        let transfer_type = TransferType::from_u8(data[0])?;
-        let filename_len = u16::from_be_bytes([data[1], data[2]]) as usize;
-        // Need: 1 (type) + 2 (filename_len) + filename + 8 (file_size) + 8 (checksum)
-        if data.len() < 3 + filename_len + 16 {
+        let filename_len = u16::from_be_bytes([data[0], data[1]]) as usize;
+        // Need: 2 (filename_len) + filename + 8 (file_size) + 8 (checksum)
+        if data.len() < 2 + filename_len + 16 {
             anyhow::bail!("Header data truncated");
         }
 
-        let filename = String::from_utf8(data[3..3 + filename_len].to_vec())
+        let filename = String::from_utf8(data[2..2 + filename_len].to_vec())
             .context("Invalid filename encoding")?;
 
         // Validate filename doesn't contain path traversal or invalid characters
@@ -151,7 +106,7 @@ impl FileHeader {
             anyhow::bail!("Invalid filename: empty");
         }
 
-        let size_start = 3 + filename_len;
+        let size_start = 2 + filename_len;
         let file_size = u64::from_be_bytes(data[size_start..size_start + 8].try_into().unwrap());
 
         let checksum_start = size_start + 8;
@@ -159,7 +114,6 @@ impl FileHeader {
             u64::from_be_bytes(data[checksum_start..checksum_start + 8].try_into().unwrap());
 
         Ok(Self {
-            transfer_type,
             filename,
             file_size,
             checksum,
@@ -301,25 +255,6 @@ pub fn format_resume_progress(offset: u64, file_size: u64) -> String {
     )
 }
 
-/// Prompt user for confirmation if folder archive exceeds soft limit.
-/// Only used for folders since they are NOT resumable. Files are resumable and don't need this warning.
-/// Returns Ok(true) to proceed, Ok(false) to cancel.
-///
-/// This function is async and runs blocking I/O in a separate thread to avoid
-/// blocking the Tokio runtime.
-pub async fn confirm_large_folder_transfer(file_size: u64, filename: &str) -> Result<bool> {
-    if file_size <= LARGE_FILE_THRESHOLD {
-        return Ok(true);
-    }
-
-    // Capture values needed in the blocking closure
-    let filename = filename.to_string();
-
-    tokio::task::spawn_blocking(move || ui::sink().confirm_large_folder(file_size, &filename))
-        .await
-        .context("Blocking task panicked")?
-}
-
 /// Result of preparing a file for transfer
 pub struct PreparedFile {
     pub file: File,
@@ -367,92 +302,23 @@ pub async fn prepare_file_for_send(file_path: &Path) -> Result<Option<PreparedFi
     }))
 }
 
-/// Result of preparing a folder archive for transfer
-pub struct PreparedFolder {
-    pub file: File,
-    pub filename: String,
-    pub file_size: u64,
-    /// Keep temp file alive to prevent deletion until transfer completes
-    pub temp_file: NamedTempFile,
-    /// Checksum (always 0 for folders, as they are not resumable)
-    pub checksum: u64,
-}
-
-/// Prepare a folder for sending: validate, create tar archive, confirm if large, and open.
-/// Returns None if user cancels the transfer.
-pub async fn prepare_folder_for_send(folder_path: &Path) -> Result<Option<PreparedFolder>> {
-    // Validate folder
-    if !folder_path.is_dir() {
-        anyhow::bail!("Not a directory: {}", folder_path.display());
-    }
-
-    let folder_name = folder_path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .context("Invalid folder name")?;
-
-    // Validate folder name - must not contain path separators or traversal patterns
-    if is_invalid_filename(folder_name) {
-        anyhow::bail!("Invalid folder name: contains path traversal or invalid characters");
-    }
-    if folder_name.is_empty() {
-        anyhow::bail!("Invalid folder name: empty");
-    }
-
-    ui::sink().info(&format!("📁 Creating tar archive of: {}", folder_name));
-    print_tar_creation_info();
-
-    // Create tar archive
-    let tar_archive = create_tar_archive(folder_path)?;
-    let filename = tar_archive.filename;
-    let file_size = tar_archive.file_size;
-
-    ui::sink().info(&format!(
-        "📦 Archive created: {} ({})",
-        filename,
-        format_bytes(file_size)
-    ));
-
-    // Confirm if archive is large (folders are NOT resumable)
-    if !confirm_large_folder_transfer(file_size, &filename).await? {
-        ui::sink().info("Transfer cancelled.");
-        return Ok(None);
-    }
-
-    // Open tar file
-    let file = File::open(tar_archive.temp_file.path())
-        .await
-        .context("Failed to open tar file")?;
-
-    Ok(Some(PreparedFolder {
-        file,
-        filename,
-        file_size,
-        temp_file: tar_archive.temp_file,
-        checksum: 0, // Folders are not resumable
-    }))
-}
-
-// ============================================================================
-// Generic sender wrappers (reduce duplication between files and folders)
-// ============================================================================
-
-/// Generic file sender that accepts a closure for mode-specific transfer logic.
+/// Generic file sender that accepts a closure for the transport-specific
+/// transfer logic.
 ///
-/// This function handles file preparation (validation, size check, confirmation)
-/// and delegates the actual transfer to the provided closure.
+/// This function handles file preparation (validation, checksum, open) and
+/// delegates the actual transfer to the provided closure.
 ///
 /// # Arguments
 /// * `file_path` - Path to the file to send
-/// * `transfer_fn` - Closure that performs the mode-specific transfer.
-///   Receives: (file, filename, file_size, checksum, transfer_type)
+/// * `transfer_fn` - Closure that performs the transport-specific transfer.
+///   Receives: (file, filename, file_size, checksum)
 ///
 /// # Returns
 /// * `Ok(())` if transfer completes or user cancels
 /// * `Err` if preparation or transfer fails
 pub async fn send_file_with<F, Fut>(file_path: &Path, transfer_fn: F) -> Result<()>
 where
-    F: FnOnce(File, String, u64, u64, TransferType) -> Fut,
+    F: FnOnce(File, String, u64, u64) -> Fut,
     Fut: Future<Output = Result<()>>,
 {
     let prepared = match prepare_file_for_send(file_path).await? {
@@ -465,60 +331,8 @@ where
         prepared.filename,
         prepared.file_size,
         prepared.checksum,
-        TransferType::File,
     )
     .await
-}
-
-/// Generic folder sender that accepts a closure for mode-specific transfer logic.
-///
-/// This function handles folder preparation (tar archive creation, size check,
-/// confirmation) and interrupt handling with temp file cleanup.
-///
-/// # Arguments
-/// * `folder_path` - Path to the folder to send
-/// * `transfer_fn` - Closure that performs the mode-specific transfer.
-///   Receives: (file, filename, file_size, checksum, transfer_type)
-///
-/// # Returns
-/// * `Ok(())` if transfer completes or user cancels
-/// * `Err(Interrupted)` if user presses Ctrl+C
-/// * `Err` if preparation or transfer fails
-pub async fn send_folder_with<F, Fut>(folder_path: &Path, transfer_fn: F) -> Result<()>
-where
-    F: FnOnce(File, String, u64, u64, TransferType) -> Fut,
-    Fut: Future<Output = Result<()>> + Send,
-{
-    let prepared = match prepare_folder_for_send(folder_path).await? {
-        Some(p) => p,
-        None => return Ok(()),
-    };
-
-    // Set up cleanup handler for Ctrl+C
-    let temp_path = prepared.temp_file.path().to_path_buf();
-    let cleanup_handler = setup_temp_file_cleanup_handler(temp_path.clone());
-
-    // Run transfer with interrupt handling
-    let result = tokio::select! {
-        result = transfer_fn(
-            prepared.file,
-            prepared.filename,
-            prepared.file_size,
-            0, // Folders are not resumable
-            TransferType::Folder,
-        ) => result,
-        _ = cleanup_handler.shutdown_rx => {
-            // Graceful shutdown requested - clean up and return Interrupted error
-            cleanup_handler.cleanup_path.lock().await.take();
-            let _ = tokio::fs::remove_file(&temp_path).await;
-            return Err(Interrupted.into());
-        }
-    };
-
-    // Clear cleanup path (transfer completed or failed normally)
-    cleanup_handler.cleanup_path.lock().await.take();
-
-    result
 }
 
 // ============================================================================
@@ -888,8 +702,8 @@ pub fn prepare_file_receiver(
 ) -> Result<(FileReceiver, ControlSignal)> {
     let temp_path = temp_file_path(final_path);
 
-    // Folders are not resumable
-    if header.transfer_type == TransferType::Folder || no_resume || header.checksum == 0 {
+    // A zero checksum means the sender did not provide one, so resume is unavailable
+    if no_resume || header.checksum == 0 {
         // Create fresh temp file
         let metadata = ResumeMetadata {
             checksum: header.checksum,
@@ -1056,48 +870,27 @@ pub struct CleanupHandler {
     pub shutdown_rx: tokio::sync::oneshot::Receiver<()>,
 }
 
-/// Describes what cleanup action to take on Ctrl+C interrupt.
-enum CleanupAction {
-    /// Remove a file unconditionally.
-    RemoveFile,
-    /// Remove a directory recursively.
-    RemoveDir,
-    /// Remove a file only if the transfer is not resumable;
-    /// otherwise preserve it for resume.
-    ResumableFile { is_resumable: bool },
-}
-
-/// Shared helper that wires up Ctrl+C → cleanup → shutdown signal.
-fn spawn_cleanup_handler(path: PathBuf, action: CleanupAction) -> CleanupHandler {
-    let cleanup_path: CleanupPath = std::sync::Arc::new(tokio::sync::Mutex::new(Some(path)));
+/// Set up Ctrl+C handler for resumable transfers.
+/// For resumable transfers, preserves the temp file and logs a resume message.
+/// For non-resumable transfers, removes the temp file on interrupt.
+///
+/// Returns a CleanupHandler with:
+/// - `cleanup_path`: Clear this when transfer completes normally
+/// - `shutdown_rx`: Await or select! on this to detect interrupt and shut down gracefully
+///
+/// The caller should handle the shutdown signal and exit with code 130.
+pub fn setup_resumable_cleanup_handler(temp_path: PathBuf, is_resumable: bool) -> CleanupHandler {
+    let cleanup_path: CleanupPath = std::sync::Arc::new(tokio::sync::Mutex::new(Some(temp_path)));
     let cleanup_clone = cleanup_path.clone();
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
 
     tokio::spawn(async move {
         if tokio::signal::ctrl_c().await.is_ok() {
-            match action {
-                CleanupAction::RemoveFile => {
-                    if let Some(path) = cleanup_clone.lock().await.take() {
-                        let _ = tokio::fs::remove_file(&path).await;
-                        ui::sink().status("\nInterrupted. Cleaned up temp file.");
-                    }
-                }
-                CleanupAction::RemoveDir => {
-                    if let Some(path) = cleanup_clone.lock().await.take() {
-                        let _ = tokio::fs::remove_dir_all(&path).await;
-                        ui::sink().status("\nInterrupted. Cleaned up extraction directory.");
-                    }
-                }
-                CleanupAction::ResumableFile { is_resumable } => {
-                    if !is_resumable {
-                        if let Some(path) = cleanup_clone.lock().await.take() {
-                            let _ = tokio::fs::remove_file(&path).await;
-                            ui::sink().status("\nInterrupted. Cleaned up temp file.");
-                        }
-                    } else {
-                        ui::sink().status("\nInterrupted. Partial download saved for resume.");
-                    }
-                }
+            if is_resumable {
+                ui::sink().status("\nInterrupted. Partial download saved for resume.");
+            } else if let Some(path) = cleanup_clone.lock().await.take() {
+                let _ = tokio::fs::remove_file(&path).await;
+                ui::sink().status("\nInterrupted. Cleaned up temp file.");
             }
             let _ = shutdown_tx.send(());
         }
@@ -1107,43 +900,6 @@ fn spawn_cleanup_handler(path: PathBuf, action: CleanupAction) -> CleanupHandler
         cleanup_path,
         shutdown_rx,
     }
-}
-
-/// Set up Ctrl+C handler for resumable transfers.
-/// For resumable transfers, preserves temp file and logs resume message.
-/// For non-resumable transfers, removes temp file on interrupt.
-///
-/// Returns a CleanupHandler with:
-/// - `cleanup_path`: Clear this when transfer completes normally
-/// - `shutdown_rx`: Await or select! on this to detect interrupt and shut down gracefully
-///
-/// The caller should handle the shutdown signal and exit with code 130.
-pub fn setup_resumable_cleanup_handler(temp_path: PathBuf, is_resumable: bool) -> CleanupHandler {
-    spawn_cleanup_handler(temp_path, CleanupAction::ResumableFile { is_resumable })
-}
-
-/// Set up Ctrl+C handler to always clean up a temp file on interrupt.
-/// Used by senders for folder transfers (temp tar archives are not resumable).
-///
-/// Returns a CleanupHandler with:
-/// - `cleanup_path`: Clear this when transfer completes normally
-/// - `shutdown_rx`: Await or select! on this to detect interrupt and shut down gracefully
-///
-/// The caller should handle the shutdown signal and exit with code 130.
-pub fn setup_temp_file_cleanup_handler(temp_path: PathBuf) -> CleanupHandler {
-    spawn_cleanup_handler(temp_path, CleanupAction::RemoveFile)
-}
-
-/// Set up Ctrl+C handler to clean up extraction directory on interrupt.
-/// Used by receivers for folder transfers to clean up partial extraction.
-///
-/// Returns a CleanupHandler with:
-/// - `cleanup_path`: Clear this when extraction completes normally
-/// - `shutdown_rx`: Await or select! on this to detect interrupt and shut down gracefully
-///
-/// The caller should handle the shutdown signal and exit with code 130.
-pub fn setup_dir_cleanup_handler(extract_dir: PathBuf) -> CleanupHandler {
-    spawn_cleanup_handler(extract_dir, CleanupAction::RemoveDir)
 }
 
 // ============================================================================
@@ -1280,18 +1036,13 @@ where
     }
 }
 
-use crate::core::folder::{
-    StreamingReader, extract_tar_archive_returning_reader, get_extraction_dir,
-    print_skipped_entries, print_tar_extraction_info,
-};
-
 /// Unified receiver transfer logic for WebRTC streams.
 ///
 /// Handles the complete transfer flow:
 /// 1. Receive header
-/// 2. Handle file existence check (for files)
+/// 2. Handle file existence check
 /// 3. Prepare receiver and send control signal
-/// 4. Receive file/folder data
+/// 4. Receive file data
 /// 5. Finalize transfer
 /// 6. Send ACK
 ///
@@ -1301,7 +1052,7 @@ use crate::core::folder::{
 /// * `no_resume` - If true, disable resume support
 ///
 /// # Returns
-/// * Tuple of (path to received file/directory, stream for WebRTC cleanup)
+/// * Tuple of (path to received file, stream for WebRTC cleanup)
 pub async fn run_receiver_transfer<S>(
     stream: S,
     output_dir: Option<PathBuf>,
@@ -1310,7 +1061,6 @@ pub async fn run_receiver_transfer<S>(
 where
     S: AsyncReadExt + AsyncWriteExt + Unpin + Send + 'static,
 {
-    // We need to box the stream to allow moving it between async/sync contexts
     let mut stream = stream;
 
     // 1. Receive header
@@ -1326,17 +1076,9 @@ where
 
     let output_dir = output_dir.unwrap_or_else(|| PathBuf::from("."));
 
-    // 2. Handle based on transfer type
-    let (final_path, stream) = match header.transfer_type {
-        TransferType::File => {
-            let path =
-                receive_file_transfer_impl(&mut stream, &header, &output_dir, no_resume).await?;
-            (path, stream)
-        }
-        TransferType::Folder => {
-            receive_folder_transfer_impl(stream, &header, &output_dir).await?
-        }
-    };
+    // 2. Receive the file
+    let final_path =
+        receive_file_transfer_impl(&mut stream, &header, &output_dir, no_resume).await?;
 
     Ok((final_path, stream))
 }
@@ -1445,78 +1187,4 @@ where
         .context("Failed to send acknowledgment")?;
 
     Ok(final_output_path)
-}
-
-/// Internal implementation for folder transfer reception.
-/// Returns (path, stream) so callers can perform transport-specific cleanup.
-async fn receive_folder_transfer_impl<S>(
-    mut stream: S,
-    header: &FileHeader,
-    output_dir: &Path,
-) -> Result<(PathBuf, S)>
-where
-    S: AsyncReadExt + AsyncWriteExt + Unpin + Send + 'static,
-{
-    ui::sink().status(&format!(
-        "Receiving folder archive: {} ({})",
-        header.filename,
-        format_bytes(header.file_size)
-    ));
-
-    // Folders are not resumable, always send proceed
-    send_proceed(&mut stream)
-        .await
-        .context("Failed to send proceed signal")?;
-    ui::sink().status("Ready to receive data...");
-
-    // Determine extraction directory
-    let extract_dir = get_extraction_dir(Some(output_dir.to_path_buf()));
-    std::fs::create_dir_all(&extract_dir).context("Failed to create extraction directory")?;
-
-    // Set up cleanup handler
-    let cleanup_handler = setup_dir_cleanup_handler(extract_dir.clone());
-
-    ui::sink().status(&format!("Extracting to: {}", extract_dir.display()));
-    print_tar_extraction_info();
-
-    // Get runtime handle for blocking in StreamingReader
-    let runtime_handle = tokio::runtime::Handle::current();
-
-    // Create streaming reader that feeds tar extractor
-    let reader = StreamingReader::new(stream, header.file_size, runtime_handle);
-
-    // Run tar extraction in blocking context with interrupt handling
-    let extract_dir_clone = extract_dir.clone();
-    let extraction_result = tokio::select! {
-        result = tokio::task::spawn_blocking(move || {
-            extract_tar_archive_returning_reader(reader, &extract_dir_clone)
-        }) => result.context("Extraction task panicked")?,
-        _ = cleanup_handler.shutdown_rx => {
-            // Graceful shutdown requested - return Interrupted error
-            // Note: cleanup_handler already cleaned up the directory in its signal handler
-            return Err(Interrupted.into());
-        }
-    };
-
-    let (skipped_entries, streaming_reader) = extraction_result?;
-
-    // Report skipped entries
-    print_skipped_entries(&skipped_entries);
-
-    // Clear cleanup
-    cleanup_handler.cleanup_path.lock().await.take();
-
-    ui::sink().status("\nFolder received successfully!");
-    ui::sink().status(&format!("Extracted to: {}", extract_dir.display()));
-
-    // Get stream back and send ACK
-    // Validate that all expected bytes were received before sending ACK
-    let mut stream = streaming_reader
-        .into_inner()
-        .context("Transfer validation failed")?;
-    send_ack(&mut stream)
-        .await
-        .context("Failed to send acknowledgment")?;
-
-    Ok((extract_dir, stream))
 }

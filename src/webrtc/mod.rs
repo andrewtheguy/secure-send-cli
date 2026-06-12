@@ -8,4 +8,4 @@ pub mod sender;
 
 pub use offline_receiver::receive_file_offline;
 pub use receiver::receive_webrtc;
-pub use sender::{send_file_webrtc, send_folder_webrtc};
+pub use sender::send_file_webrtc;

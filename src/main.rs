@@ -31,7 +31,7 @@ struct Cli {
 enum Commands {
     /// Send a file using WebRTC transport
     Send {
-        /// Path to file or folder to send
+        /// Path to the file to send
         path: PathBuf,
 
         /// Use manual signaling (copy/paste SDP offers) instead of Nostr
@@ -102,20 +102,18 @@ async fn async_main() -> Result<()> {
             default_relays,
             relay,
         } => {
+            if path.is_dir() {
+                anyhow::bail!(
+                    "Path is a directory: {} (only single files can be sent)",
+                    path.display()
+                );
+            }
+
             if manual {
-                if path.is_dir() {
-                    webrtc::offline_sender::send_folder_offline(&path).await?;
-                } else {
-                    webrtc::offline_sender::send_file_offline(&path).await?;
-                }
+                webrtc::offline_sender::send_file_offline(&path).await?;
             } else {
                 let custom_relays = if relay.is_empty() { None } else { Some(relay) };
-
-                if path.is_dir() {
-                    webrtc::send_folder_webrtc(&path, custom_relays, default_relays).await?;
-                } else {
-                    webrtc::send_file_webrtc(&path, custom_relays, default_relays).await?;
-                }
+                webrtc::send_file_webrtc(&path, custom_relays, default_relays).await?;
             }
         }
 

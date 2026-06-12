@@ -9,10 +9,7 @@ use tokio::time::Duration;
 use webrtc::ice_transport::ice_candidate::RTCIceCandidateInit;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 
-use crate::core::transfer::{
-    FileHeader, Interrupted, TransferType, prepare_file_for_send, prepare_folder_for_send,
-    run_sender_transfer, setup_temp_file_cleanup_handler,
-};
+use crate::core::transfer::{FileHeader, prepare_file_for_send, run_sender_transfer};
 
 use crate::signaling::offline::{
     OfflineOffer, TransferInfo, display_offer_json, ice_candidates_to_payloads, read_answer_json,
@@ -37,44 +34,8 @@ pub async fn send_file_offline(file_path: &Path) -> Result<()> {
         prepared.filename,
         prepared.file_size,
         prepared.checksum,
-        TransferType::File,
     )
     .await
-}
-
-/// Send a folder via offline WebRTC (copy/paste JSON signaling)
-pub async fn send_folder_offline(folder_path: &Path) -> Result<()> {
-    let prepared = match prepare_folder_for_send(folder_path).await? {
-        Some(p) => p,
-        None => return Ok(()),
-    };
-
-    // Set up cleanup handler
-    let temp_path = prepared.temp_file.path().to_path_buf();
-    let cleanup_handler = setup_temp_file_cleanup_handler(temp_path.clone());
-
-    // Run transfer with interrupt handling
-    let result = tokio::select! {
-        result = transfer_offline_internal(
-            prepared.file,
-            prepared.filename,
-            prepared.file_size,
-            0, // Folders are not resumable
-            TransferType::Folder,
-        ) => result,
-        _ = cleanup_handler.shutdown_rx => {
-            // Graceful shutdown requested - clean up and return Interrupted error
-            cleanup_handler.cleanup_path.lock().await.take();
-            let _ = tokio::fs::remove_file(&temp_path).await;
-            return Err(Interrupted.into());
-        }
-    };
-
-    // Clean up temp file
-    cleanup_handler.cleanup_path.lock().await.take();
-    let _ = tokio::fs::remove_file(&temp_path).await;
-
-    result
 }
 
 /// Internal transfer implementation using common transfer protocol
@@ -83,7 +44,6 @@ async fn transfer_offline_internal(
     filename: String,
     file_size: u64,
     checksum: u64,
-    transfer_type: TransferType,
 ) -> Result<()> {
     eprintln!("\nPreparing WebRTC offline transfer...");
 
@@ -127,10 +87,6 @@ async fn transfer_offline_internal(
         transfer_info: TransferInfo {
             filename: filename.clone(),
             file_size,
-            transfer_type: match transfer_type {
-                TransferType::File => "file".to_string(),
-                TransferType::Folder => "folder".to_string(),
-            },
         },
         created_at,
     };
@@ -205,7 +161,7 @@ async fn transfer_offline_internal(
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     // Create header for common transfer protocol
-    let header = FileHeader::new(transfer_type, filename.clone(), file_size, checksum);
+    let header = FileHeader::new(filename.clone(), file_size, checksum);
 
     // Use common transfer protocol
     let mut stream = stream;

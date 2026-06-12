@@ -1,5 +1,5 @@
 use xfer_webrtc::core::transfer::{
-    CHUNK_SIZE, ControlSignal, FileHeader, TransferType, recv_chunk, recv_control, recv_header,
+    CHUNK_SIZE, ControlSignal, FileHeader, recv_chunk, recv_control, recv_header,
     send_ack, send_chunk, send_header, send_proceed, send_resume,
 };
 use tokio::io::duplex;
@@ -7,7 +7,7 @@ use tokio::io::duplex;
 #[tokio::test]
 async fn test_header_roundtrip() {
     let (mut client, mut server) = duplex(4096);
-    let header = FileHeader::new(TransferType::File, "test_file.txt".to_string(), 12345, 0);
+    let header = FileHeader::new("test_file.txt".to_string(), 12345, 0);
 
     let send_handle = tokio::spawn(async move { send_header(&mut client, &header).await });
 
@@ -68,7 +68,7 @@ async fn test_full_transfer_simulation() {
     let filename_clone = filename.clone();
     let file_data_clone = file_data.to_vec();
     let send_handle = tokio::spawn(async move {
-        let header = FileHeader::new(TransferType::File, filename_clone, file_size, 0);
+        let header = FileHeader::new(filename_clone, file_size, 0);
         send_header(&mut client, &header).await.unwrap();
         send_chunk(&mut client, &file_data_clone).await.unwrap();
     });
@@ -92,12 +92,7 @@ async fn test_large_file_multi_chunk() {
 
     let file_data_clone = file_data.clone();
     let send_handle = tokio::spawn(async move {
-        let header = FileHeader::new(
-            TransferType::File,
-            "large_file.bin".to_string(),
-            file_size as u64,
-            0,
-        );
+        let header = FileHeader::new("large_file.bin".to_string(), file_size as u64, 0);
         send_header(&mut client, &header).await.unwrap();
 
         for chunk in file_data_clone.chunks(CHUNK_SIZE) {
@@ -128,7 +123,7 @@ async fn test_exact_chunk_size_file() {
 
     let file_data_clone = file_data.clone();
     let send_handle = tokio::spawn(async move {
-        let header = FileHeader::new(TransferType::File, "exact_chunk.bin".to_string(), file_size, 0);
+        let header = FileHeader::new("exact_chunk.bin".to_string(), file_size, 0);
         send_header(&mut client, &header).await.unwrap();
         send_chunk(&mut client, &file_data_clone).await.unwrap();
     });
@@ -149,7 +144,7 @@ async fn test_empty_file_header_roundtrip() {
 
     let filename_clone = filename.clone();
     let send_handle = tokio::spawn(async move {
-        let header = FileHeader::new(TransferType::File, filename_clone, 0, 0);
+        let header = FileHeader::new(filename_clone, 0, 0);
         send_header(&mut client, &header).await.unwrap();
     });
 
@@ -161,26 +156,11 @@ async fn test_empty_file_header_roundtrip() {
 }
 
 #[tokio::test]
-async fn test_folder_transfer_type() {
-    let (mut client, mut server) = duplex(4096);
-    let header = FileHeader::new(TransferType::Folder, "myfolder.tar".to_string(), 54321, 0);
-
-    let send_handle = tokio::spawn(async move { send_header(&mut client, &header).await });
-
-    let received = recv_header(&mut server).await.unwrap();
-    send_handle.await.unwrap().unwrap();
-
-    assert_eq!(received.transfer_type, TransferType::Folder);
-    assert_eq!(received.filename, "myfolder.tar");
-    assert_eq!(received.file_size, 54321);
-}
-
-#[tokio::test]
 async fn test_special_characters_in_filename() {
     let (mut client, mut server) = duplex(4096);
     let filename = "file with spaces & special (chars) [2024].txt".to_string();
 
-    let header = FileHeader::new(TransferType::File, filename.clone(), 100, 0);
+    let header = FileHeader::new(filename.clone(), 100, 0);
     let send_handle = tokio::spawn(async move {
         send_header(&mut client, &header).await.unwrap();
     });

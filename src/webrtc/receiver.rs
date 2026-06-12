@@ -194,7 +194,7 @@ async fn try_webrtc_receive(
     Ok(WebRtcResult::Success)
 }
 
-/// Receive a file or folder via webrtc transport
+/// Receive a file via webrtc transport
 pub async fn receive_webrtc(
     code: &str,
     output_dir: Option<PathBuf>,

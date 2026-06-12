@@ -13,7 +13,7 @@ use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 
 use crate::core::xfer::{SESSION_TTL_SECS, generate_webrtc_code};
 use crate::core::transfer::{
-    FileHeader, TransferType, format_bytes, run_sender_transfer, send_file_with, send_folder_with,
+    FileHeader, format_bytes, run_sender_transfer, send_file_with,
 };
 
 use crate::signaling::nostr::{NostrSignaling, SignalingMessage, create_sender_signaling};
@@ -271,7 +271,6 @@ async fn transfer_data_webrtc_internal(
     filename: String,
     file_size: u64,
     checksum: u64,
-    transfer_type: TransferType,
     custom_relays: Option<Vec<String>>,
     use_default_relays: bool,
 ) -> Result<()> {
@@ -289,10 +288,6 @@ async fn transfer_data_webrtc_internal(
         signaling.transfer_id().to_string(),
         signaling.relay_urls().to_vec(),
         filename.clone(),
-        match transfer_type {
-            TransferType::File => "file",
-            TransferType::Folder => "folder",
-        },
     )?;
 
     display_transfer_code(&code);
@@ -302,7 +297,7 @@ async fn transfer_data_webrtc_internal(
     eprintln!("\nWaiting for receiver to connect...");
 
     // Create header for common transfer protocol
-    let header = FileHeader::new(transfer_type, filename.clone(), file_size, checksum);
+    let header = FileHeader::new(filename.clone(), file_size, checksum);
 
     // Try WebRTC transfer
     match try_webrtc_transfer(&mut file, &header, &signaling).await? {
@@ -350,55 +345,12 @@ async fn send_file_webrtc_internal(
 ) -> Result<()> {
     send_file_with(
         file_path,
-        |file, filename, file_size, checksum, transfer_type| {
+        |file, filename, file_size, checksum| {
             transfer_data_webrtc_internal(
                 file,
                 filename,
                 file_size,
                 checksum,
-                transfer_type,
-                custom_relays,
-                use_default_relays,
-            )
-        },
-    )
-    .await
-}
-
-/// Send a folder as a tar archive via webrtc transport
-pub async fn send_folder_webrtc(
-    folder_path: &Path,
-    custom_relays: Option<Vec<String>>,
-    use_default_relays: bool,
-) -> Result<()> {
-    // Try normal Nostr signaling path
-    match send_folder_webrtc_internal(folder_path, custom_relays, use_default_relays).await {
-        Ok(()) => Ok(()),
-        Err(e) => {
-            let path = folder_path.to_path_buf();
-            handle_signaling_error_with_fallback(e, || async move {
-                crate::webrtc::offline_sender::send_folder_offline(&path).await
-            })
-            .await
-        }
-    }
-}
-
-/// Internal function for normal Nostr signaling path (folder)
-async fn send_folder_webrtc_internal(
-    folder_path: &Path,
-    custom_relays: Option<Vec<String>>,
-    use_default_relays: bool,
-) -> Result<()> {
-    send_folder_with(
-        folder_path,
-        |file, filename, file_size, _checksum, transfer_type| {
-            transfer_data_webrtc_internal(
-                file,
-                filename,
-                file_size,
-                0, // Folders are not resumable
-                transfer_type,
                 custom_relays,
                 use_default_relays,
             )

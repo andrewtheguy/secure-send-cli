@@ -52,14 +52,3 @@ on the receiver)
   `xfer-webrtc receive`, pastes the offer, and replies with an answer code. The
   exchanged text includes signaling metadata needed to establish the WebRTC
   data channel.
-
----
-
-## 3. Folder Transfer
-**Scenario**: Sending an entire directory rather than a single file.
-
-**Solution**: Pass the directory path; it is auto-detected and archived (tar)
-before transfer.
-```bash
-xfer-webrtc send /path/to/folder
-```
