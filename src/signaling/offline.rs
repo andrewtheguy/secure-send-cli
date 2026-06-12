@@ -1,8 +1,9 @@
 //! Offline WebRTC signaling via copy/paste JSON
 //!
-//! This module provides signaling for WebRTC connections without any servers.
-//! Users manually copy and paste JSON between sender and receiver to establish
-//! the connection. This is useful for direct LAN transfers without internet.
+//! This module provides signaling for WebRTC connections without Nostr relays or
+//! other signaling servers. Users manually copy and paste JSON between sender
+//! and receiver to establish the connection. The CLI still configures public
+//! STUN servers for ICE NAT traversal when the network allows them.
 
 use anyhow::{Context, Result};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};

@@ -83,6 +83,10 @@ xfer-webrtc send --default-relays /path/to/file
 xfer-webrtc send --relay wss://relay1.example.com --relay wss://relay2.example.com /path/to/file
 ```
 
+If online signaling fails on the sender, the CLI prompts to continue the same
+transfer with manual copy-paste signaling. Press Enter to use that fallback, or
+Ctrl+C to abort.
+
 Receiving:
 
 ```bash
@@ -103,7 +107,9 @@ xfer-webrtc receive <XFER_CODE> --no-resume
 
 Use manual mode when Nostr relays are unavailable and both peers still have
 direct network reachability (for example, same LAN or a routed private/VPN
-path). Offer/answer codes are exchanged by copy-paste.
+path). Offer/answer codes are exchanged by copy-paste. Manual mode removes
+relay signaling only; the CLI still configures public STUN servers for ICE NAT
+traversal when the network allows them.
 
 ```bash
 # Sender
@@ -115,12 +121,12 @@ xfer-webrtc receive
 
 The receiver uses the same `receive` command for both modes: paste a xfer code
 for a normal Nostr transfer, or paste a manual offer code and it is detected
-automatically.
+automatically. There is no separate `receive --manual` flag.
 
 ## Common Use Cases
 
 - **Send over the internet without exchanging IPs** — use the default online mode; Nostr relays handle signaling while the file flows directly peer-to-peer.
-- **No internet or relays blocked** — use manual mode (`send --manual` / `receive`) to exchange signaling by copy-paste over a LAN or routed private/VPN network.
+- **No internet or relays blocked** — use `send --manual` on the sender and plain `receive` on the receiver to exchange signaling by copy-paste over a LAN or routed private/VPN network.
 - **Send a whole directory** — pass a folder path; it is auto-detected and archived before transfer.
 
 See [USE_CASES.md](docs/USE_CASES.md) for detailed scenarios.

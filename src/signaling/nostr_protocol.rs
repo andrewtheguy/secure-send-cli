@@ -490,7 +490,7 @@ pub fn create_relay_list_event(keys: &Keys, relays: &[String]) -> Result<Event> 
 ///
 /// # Arguments
 /// * `keys` - Sender's keys for signing
-/// * `write_relays` - Relays where sender will publish file chunks
+/// * `write_relays` - Relays where the sender will publish signaling events
 /// * `bridge_relays` - Well-known relays to publish NIP-65 event to
 pub async fn publish_relay_list_event(
     keys: &Keys,

@@ -5,8 +5,8 @@
 //! and use it to seal the SDP/ICE signaling payloads they publish to relays.
 //!
 //! This provides two properties over the relay:
-//! - **Confidentiality**: relays (and anyone who copies the code) never see the
-//!   SDP or ICE candidates, so local network candidate addresses are not exposed.
+//! - **Confidentiality**: relays and observers without the code never see the SDP
+//!   or ICE candidates, so local network candidate addresses are not exposed.
 //! - **Authentication (both directions)**: only a party holding the PSK can
 //!   produce a payload that decrypts, so a third party who learns the transfer
 //!   ID and pubkeys from relay traffic cannot forge a valid offer or answer.

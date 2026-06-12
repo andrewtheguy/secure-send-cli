@@ -11,8 +11,8 @@ signaling methods for establishing that channel:
 1. **Online (Nostr signaling)** — SDP offers/answers and ICE candidates are
    exchanged through Nostr relays via `xfer-webrtc send` / `receive`.
 2. **Manual (offline signaling)** — the offer and answer payloads are exchanged
-   by copy-paste via `xfer-webrtc send --manual`; the receiver uses the same
-   `xfer-webrtc receive`, which auto-detects a pasted manual offer.
+   by copy-paste via `xfer-webrtc send --manual`; the receiver always uses
+   plain `xfer-webrtc receive`, which auto-detects a pasted manual offer.
 
 In both cases the file bytes flow directly peer-to-peer; the signaling method
 only affects how the two peers find each other and negotiate the connection.
@@ -35,25 +35,17 @@ sequenceDiagram
 
     Receiver->>Nostr: 4. Connect & Subscribe (using xfer code)
     Receiver->>Receiver: 5. Create RTCPeerConnection + data channel
-    Receiver->>Receiver: 6. Create SDP offer
-    Note over Receiver: Seal offer + ICE with PSK (XChaCha20-Poly1305)
+    Receiver->>Receiver: 6. Create SDP offer and gather ICE candidates
+    Note over Receiver: Seal offer + bundled ICE with PSK (XChaCha20-Poly1305)
     Receiver->>Nostr: 7. Publish sealed Offer addressed to sender pubkey
 
-    Note over Receiver: Gathering ICE candidates...
-    Receiver-->>Nostr: (async) Publish sealed receiver ICE candidates
+    Nostr->>Sender: 8. Receive Offer + bundled ICE (open with PSK, drop if it fails)
 
-    Nostr->>Sender: 8. Receive Offer (open with PSK, drop if it fails)
-    Nostr-->>Sender: (async) Receive Receiver's ICE candidates
-
-    Sender->>Sender: 9. Set remote description, create SDP answer
-    Note over Sender: Seal answer + ICE with PSK
+    Sender->>Sender: 9. Set remote description, add receiver ICE, create SDP answer, gather ICE
+    Note over Sender: Seal answer + bundled ICE with PSK
     Sender->>Nostr: 10. Publish sealed Answer
 
-    Note over Sender: Gathering ICE candidates...
-    Sender-->>Nostr: (async) Publish sealed sender ICE candidates
-
-    Nostr->>Receiver: 11. Receive Answer (open with PSK, drop if it fails)
-    Nostr-->>Receiver: (async) Receive Sender's ICE candidates
+    Nostr->>Receiver: 11. Receive Answer + bundled ICE (open with PSK, drop if it fails)
 
     Note over Sender,Receiver: ICE connectivity checks, WebRTC connection established
 
@@ -94,7 +86,7 @@ sequenceDiagram
     Sender->>User: 5. Display offer code
     User->>Receiver: 6. Paste offer code into receive (auto-detected)
 
-    Receiver->>Receiver: 7. Validate offer TTL and checksum
+    Receiver->>Receiver: 7. Validate offer TTL and payload CRC32
     Receiver->>Receiver: 8. Create RTCPeerConnection
     Receiver->>Receiver: 9. Set remote offer and add sender ICE candidates
     Receiver->>Receiver: 10. Create SDP answer and gather receiver ICE candidates
@@ -197,7 +189,7 @@ TTL.
 
 **Validation Points:**
 1. **Xfer Codes** (online WebRTC via Nostr): Validated in `parse_code()` before connection.
-2. **Manual Signaling Offers** (`send --manual` / `receive`): Validated in `read_code_or_offer()` before the WebRTC handshake.
+2. **Manual Signaling Offers** (`send --manual` on the sender, plain `receive` on the receiver): Validated in `read_code_or_offer()` before the WebRTC handshake.
 
 **Error Messages:**
 - Expired codes: "Token expired: code is X minutes old (max 60 minutes). Please request a new code from the sender."
@@ -254,13 +246,17 @@ Before data transfer begins, the receiver validates the incoming transfer:
 
 1. **Sender** sends file header containing filename, size, and transfer type
 2. **Receiver** checks:
-   - If file already exists at destination
-   - If user wants to proceed (interactive prompt)
+   - For file transfers, whether the destination file already exists
+   - For file transfers, whether a matching resume temp file exists
+   - Whether the user wants to overwrite, rename, or cancel an existing file
+   - Whether a file transfer can resume automatically from a matching partial
+   - For folder transfers, which extraction directory to create/use
 3. **Receiver** responds with:
    - **PROCEED**: Accept transfer, sender begins sending data chunks
+   - **RESUME**: Resume a file transfer from the requested byte offset
    - **ABORT**: Decline transfer, connection is closed
 
 This handshake prevents:
-- Accidental file overwrites without user consent
+- Accidental file overwrites without user consent for file transfers
 - Wasted bandwidth on declined transfers
 - Sender continuing after receiver has disconnected
