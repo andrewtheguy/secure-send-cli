@@ -1,189 +1,116 @@
-//! User-interface output abstraction shared across all xfer transports.
+//! Plain-text terminal output and interactive prompts for the CLI.
 //!
-//! Transfer code dispatches status, progress, and prompts through [`UiSink`].
-//! A process installs exactly one sink via [`install`]; until then, [`sink`]
-//! returns the default [`PlainSink`] for plain-text CLI output.
+//! Status/progress go to stderr; the base64 signaling codes the user must copy
+//! go to stdout so they can be piped or redirected cleanly.
 
-use anyhow::{Result, anyhow};
 use std::io::Write;
 use std::path::Path;
-use std::sync::OnceLock;
 
-use crate::core::transfer::{FileExistsChoice, calc_percent, format_bytes};
+use anyhow::{Result, anyhow};
 
-/// Direction of a transfer, used to label progress in interactive UIs.
+use crate::util::{calc_percent, format_bytes};
+
+/// Direction of a transfer, used to label progress.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Direction {
-    /// Outgoing transfer (we are the sender).
     Send,
-    /// Incoming transfer (we are the receiver).
     Receive,
 }
 
-/// Coarse phase of a transfer. Interactive UIs use this to label the live
-/// region; [`PlainSink`] ignores it.
+/// User's choice when a destination file already exists.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Phase {
-    /// Preparing the file (checksum).
-    Preparing,
-    /// Sender is waiting for a receiver to connect.
-    Waiting,
-    /// Establishing the peer connection.
-    Connecting,
-    /// Performing an optional authentication handshake.
-    Authenticating,
-    /// Bytes are flowing.
-    Transferring,
-    /// Wrapping up (finalize, ACK, close).
-    Finalizing,
-    /// Transfer finished.
-    Done,
+pub enum FileExistsChoice {
+    Overwrite,
+    Rename,
+    Cancel,
 }
 
-/// A single progress update for the live progress indicator.
-#[derive(Debug, Clone, Copy)]
-pub struct Progress {
-    /// Whether we are sending or receiving.
-    pub dir: Direction,
-    /// Bytes transferred so far.
-    pub bytes: u64,
-    /// Total bytes expected.
-    pub total: u64,
-    /// `(current_chunk, total_chunks)` — populated by the sender, `None` for
-    /// the receiver (which historically printed no chunk counter).
-    pub chunk: Option<(u64, u64)>,
+/// Informational status line (stderr).
+pub fn status(line: &str) {
+    eprintln!("{line}");
 }
 
-/// Sink for all user-facing output produced during a transfer.
+/// A base64 signaling code the user must copy (stdout, framed for readability).
+pub fn show_code(title: &str, code: &str) {
+    println!("\n----- {title} -----");
+    println!("{code}");
+    println!("----- end -----\n");
+    let _ = std::io::stdout().flush();
+}
+
+/// Update the single-line live progress indicator (stderr).
+pub fn progress(dir: Direction, bytes: u64, total: u64) {
+    let verb = match dir {
+        Direction::Send => "Sending",
+        Direction::Receive => "Receiving",
+    };
+    eprint!(
+        "\r   {verb}: {}% ({}/{})",
+        calc_percent(bytes, total) as u32,
+        format_bytes(bytes),
+        format_bytes(total),
+    );
+    let _ = std::io::stderr().flush();
+}
+
+/// Terminate the live progress line with a newline.
+pub fn progress_end() {
+    eprintln!();
+}
+
+/// Ask how to handle an existing destination file.
+pub fn prompt_file_exists(path: &Path) -> Result<FileExistsChoice> {
+    print!(
+        "Warning: file exists: {}\n[o]verwrite / [r]ename / [c]ancel: ",
+        path.display()
+    );
+    std::io::stdout().flush()?;
+
+    let mut input = String::new();
+    std::io::stdin().read_line(&mut input)?;
+    match input.trim().to_lowercase().as_str() {
+        "o" | "overwrite" => Ok(FileExistsChoice::Overwrite),
+        "r" | "rename" => Ok(FileExistsChoice::Rename),
+        _ => Ok(FileExistsChoice::Cancel),
+    }
+}
+
+/// Read a line of input from the user with line editing.
+pub fn prompt_line(prompt: &str) -> Result<String> {
+    use rustyline::DefaultEditor;
+
+    let mut rl = DefaultEditor::new().map_err(|e| anyhow!(e.to_string()))?;
+    match rl.readline(prompt) {
+        Ok(line) => Ok(line),
+        Err(rustyline::error::ReadlineError::Interrupted) => Err(anyhow!("Interrupted")),
+        Err(rustyline::error::ReadlineError::Eof) => Err(anyhow!("EOF")),
+        Err(e) => Err(anyhow!(e.to_string())),
+    }
+}
+
+/// Read a potentially multi-line pasted code, terminated by a blank line or EOF.
 ///
-/// Methods that take input ([`prompt_file_exists`](UiSink::prompt_file_exists),
-/// [`prompt_line`](UiSink::prompt_line)) are synchronous and may block; callers
-/// already invoke them from `tokio::task::spawn_blocking`.
-pub trait UiSink: Send + Sync {
-    /// Informational status line written to stderr (was `eprintln!`).
-    fn status(&self, line: &str);
+/// Base64 SS03 codes are single-line, but users may paste with wrapping; we
+/// accumulate lines until a blank line so wrapped pastes still work.
+pub fn prompt_multiline(prompt: &str) -> Result<String> {
+    use std::io::BufRead;
 
-    /// Informational line written to stdout (was `println!`).
-    fn info(&self, line: &str);
-
-    /// Update the live progress indicator (was the `\r` progress `eprint!`).
-    fn progress(&self, p: Progress);
-
-    /// Finish the current progress indicator (was the trailing `eprintln!()`).
-    fn progress_end(&self);
-
-    /// Display the sender's xfer code.
-    fn show_code(&self, code: &str);
-
-    /// Hint the current transfer [`Phase`]. Default: ignore.
-    fn set_phase(&self, _phase: Phase) {}
-
-    /// Ask the user how to handle an existing destination file.
-    fn prompt_file_exists(&self, path: &Path) -> Result<FileExistsChoice>;
-
-    /// Read a line of input from the user. `initial` pre-fills the editable
-    /// buffer (empty for a fresh prompt).
-    fn prompt_line(&self, prompt: &str, initial: &str) -> Result<String>;
-}
-
-/// The default plain-text sink. Reproduces the original CLI output exactly so
-/// transports that never install another sink are unaffected.
-pub struct PlainSink;
-
-impl UiSink for PlainSink {
-    fn status(&self, line: &str) {
-        eprintln!("{}", line);
-    }
-
-    fn info(&self, line: &str) {
-        println!("{}", line);
-    }
-
-    fn progress(&self, p: Progress) {
-        let percent = calc_percent(p.bytes, p.total) as u32;
-        match p.chunk {
-            Some((chunk, total_chunks)) => {
-                eprint!(
-                    "\r   Progress: {}% ({}/{}) - chunk {}/{}",
-                    percent,
-                    format_bytes(p.bytes),
-                    format_bytes(p.total),
-                    chunk,
-                    total_chunks
-                );
+    eprintln!("{prompt}");
+    eprintln!("(paste the code, then press Enter on an empty line)");
+    let stdin = std::io::stdin();
+    let mut collected = String::new();
+    for line in stdin.lock().lines() {
+        let line = line?;
+        if line.trim().is_empty() {
+            if collected.trim().is_empty() {
+                continue; // ignore leading blank lines
             }
-            None => {
-                eprint!(
-                    "\r   Progress: {}% ({}/{})",
-                    percent,
-                    format_bytes(p.bytes),
-                    format_bytes(p.total)
-                );
-            }
+            break;
         }
-        let _ = std::io::stderr().flush();
+        collected.push_str(line.trim());
     }
-
-    fn progress_end(&self) {
-        eprintln!(); // New line after progress
+    if collected.trim().is_empty() {
+        return Err(anyhow!("no code entered"));
     }
-
-    fn show_code(&self, code: &str) {
-        println!("\n🔮 Xfer code:\n{}\n", code);
-    }
-
-    fn prompt_file_exists(&self, path: &Path) -> Result<FileExistsChoice> {
-        let display_path = path.display().to_string();
-
-        print!(
-            "⚠️  File exists: {}\n[o]verwrite / [r]ename / [c]ancel: ",
-            display_path
-        );
-        std::io::stdout().flush()?;
-
-        let mut input = String::new();
-        std::io::stdin().read_line(&mut input)?;
-
-        let choice = input.trim().to_lowercase();
-        match choice.as_str() {
-            "o" | "overwrite" => Ok(FileExistsChoice::Overwrite),
-            "r" | "rename" => Ok(FileExistsChoice::Rename),
-            _ => Ok(FileExistsChoice::Cancel),
-        }
-    }
-
-    fn prompt_line(&self, prompt: &str, initial: &str) -> Result<String> {
-        use rustyline::DefaultEditor;
-
-        let mut rl = DefaultEditor::new().map_err(|e| anyhow!(e.to_string()))?;
-        let readline = if initial.is_empty() {
-            rl.readline(prompt)
-        } else {
-            rl.readline_with_initial(prompt, (initial, ""))
-        };
-
-        match readline {
-            Ok(line) => Ok(line),
-            Err(rustyline::error::ReadlineError::Interrupted) => Err(anyhow!("Interrupted")),
-            Err(rustyline::error::ReadlineError::Eof) => Err(anyhow!("EOF")),
-            Err(e) => Err(anyhow!(e.to_string())),
-        }
-    }
-}
-
-static SINK: OnceLock<Box<dyn UiSink>> = OnceLock::new();
-static PLAIN: PlainSink = PlainSink;
-
-/// Install the process-wide UI sink. The first call wins; later calls are
-/// ignored (returns `false` if a sink was already installed).
-pub fn install(sink: Box<dyn UiSink>) -> bool {
-    SINK.set(sink).is_ok()
-}
-
-/// Get the installed UI sink, or the default [`PlainSink`] if none was set.
-pub fn sink() -> &'static dyn UiSink {
-    match SINK.get() {
-        Some(s) => s.as_ref(),
-        None => &PLAIN,
-    }
+    Ok(collected)
 }

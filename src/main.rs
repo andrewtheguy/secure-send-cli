@@ -1,22 +1,20 @@
-//! xfer-webrtc: WebRTC transport for peer-to-peer file transfer
+//! xfer-webrtc: CLI companion to secure-send-web for peer-to-peer file transfer.
 //!
-//! This crate provides file transfer using WebRTC data channels with
-//! Nostr relays for signaling. It supports both online (Nostr) and
-//! offline (copy/paste) signaling modes.
-//!
+//! Nostr PIN mode matches secure-send-web's Auto Exchange flow. Manual
+//! copy/paste mode exchanges SS03 offer/answer codes. QR support is intentionally
+//! not part of this CLI.
 //! Build with: cargo build --release
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
-use xfer_webrtc::core::transfer::is_interrupted;
-use xfer_webrtc::signaling::offline::{self, ReceiveInput};
-use xfer_webrtc::webrtc;
+use xfer_webrtc::util::is_interrupted;
+use xfer_webrtc::{ui, webrtc};
 
 #[derive(Parser)]
 #[command(name = "xfer-webrtc")]
-#[command(about = "Secure file transfer using WebRTC for peer-to-peer connectivity")]
+#[command(about = "Secure peer-to-peer file transfer, compatible with secure-send-web")]
 #[command(version)]
 struct Cli {
     #[command(subcommand)]
@@ -29,46 +27,36 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Send a file using WebRTC transport
+    /// Send a file. Defaults to secure-send-web Nostr PIN mode.
     Send {
         /// Path to the file to send
         path: PathBuf,
 
-        /// Use manual signaling (copy/paste SDP offers) instead of Nostr
+        /// Use manual SS03 copy/paste signaling instead of Nostr PIN mode
         #[arg(long)]
         manual: bool,
-
-        /// Use default Nostr relays instead of auto-discovery
-        #[arg(long)]
-        default_relays: bool,
-
-        /// Custom Nostr relay URLs (repeatable)
-        #[arg(long, value_name = "URL")]
-        relay: Vec<String>,
     },
 
-    /// Receive a file using WebRTC transport
-    ///
-    /// Automatically detects whether the input is a Nostr xfer code or a
-    /// manual copy/paste offer.
+    /// Receive a file. Defaults to secure-send-web Nostr PIN mode.
     Receive {
-        /// Xfer code from sender (will prompt if not provided)
+        /// PIN for Nostr mode, or sender offer code with --manual
         code: Option<String>,
 
-        /// Output directory (defaults to current directory)
+        /// Output directory (defaults to the current directory)
         #[arg(short, long)]
         output: Option<PathBuf>,
 
-        /// Disable resumable transfers (don't save partial downloads)
+        /// Use manual SS03 copy/paste signaling instead of Nostr PIN mode
         #[arg(long)]
-        no_resume: bool,
+        manual: bool,
     },
 }
 
 fn main() {
-    rustls::crypto::aws_lc_rs::default_provider().install_default().expect("Failed to install Rustls crypto provider");
+    rustls::crypto::aws_lc_rs::default_provider()
+        .install_default()
+        .expect("Failed to install Rustls crypto provider");
 
-    // Run the async main and handle errors
     let result = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -76,13 +64,11 @@ fn main() {
         .block_on(async_main());
 
     if let Err(e) = result {
-        // Check if this was an interrupt (Ctrl+C)
         if is_interrupted(&e) {
-            // Exit with 128 + SIGINT (2) = 130, standard Unix convention
+            // 128 + SIGINT(2) = 130, the conventional Unix exit code.
             std::process::exit(130);
         }
-        // Print error and exit with failure code
-        eprintln!("Error: {:?}", e);
+        eprintln!("Error: {e:?}");
         std::process::exit(1);
     }
 }
@@ -90,55 +76,42 @@ fn main() {
 async fn async_main() -> Result<()> {
     let cli = Cli::parse();
 
-    // Initialize logging with filters for noisy internal modules
     let log_level = if cli.verbose { "debug" } else { "info" };
-    let filter = format!("{},webrtc_ice=error,nostr_relay_pool=warn", log_level);
+    let filter = format!("{log_level},webrtc_ice=error");
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(&filter)).init();
 
     match cli.command {
-        Commands::Send {
-            path,
-            manual,
-            default_relays,
-            relay,
-        } => {
+        Commands::Send { path, manual } => {
             if path.is_dir() {
                 anyhow::bail!(
                     "Path is a directory: {} (only single files can be sent)",
                     path.display()
                 );
             }
-
             if manual {
-                webrtc::offline_sender::send_file_offline(&path).await?;
+                webrtc::send_file_manual(&path).await?;
             } else {
-                let custom_relays = if relay.is_empty() { None } else { Some(relay) };
-                webrtc::send_file_webrtc(&path, custom_relays, default_relays).await?;
+                webrtc::send_file_nostr(&path).await?;
             }
         }
 
         Commands::Receive {
             code,
             output,
-            no_resume,
+            manual,
         } => {
-            // A xfer code given on the command line is always an automatic
-            // transfer; otherwise read from stdin and auto-detect the mode.
-            let input = match code {
-                Some(c) => ReceiveInput::Code(c.trim().to_string()),
-                None => offline::read_code_or_offer()?,
-            };
-
-            match input {
-                ReceiveInput::Code(code) => {
-                    if code.is_empty() {
-                        anyhow::bail!("Xfer code is required");
-                    }
-                    webrtc::receive_webrtc(&code, output, no_resume).await?;
-                }
-                ReceiveInput::Manual(offer) => {
-                    webrtc::receive_file_offline(*offer, output, no_resume).await?;
-                }
+            if manual {
+                let offer_code = match code {
+                    Some(c) => c,
+                    None => ui::prompt_multiline("Paste the sender's offer code:")?,
+                };
+                webrtc::receive_file_manual(offer_code.trim(), output).await?;
+            } else {
+                let pin = match code {
+                    Some(c) => c,
+                    None => ui::prompt_line("Enter secure-send PIN: ")?,
+                };
+                webrtc::receive_file_nostr(pin.trim(), output).await?;
             }
         }
     }

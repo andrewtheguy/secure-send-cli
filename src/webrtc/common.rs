@@ -12,8 +12,8 @@ use tokio::sync::watch;
 use webrtc::api::APIBuilder;
 use webrtc::api::interceptor_registry::register_default_interceptors;
 use webrtc::api::media_engine::MediaEngine;
+use webrtc::api::setting_engine::{SctpMaxMessageSize, SettingEngine};
 use webrtc::data_channel::RTCDataChannel;
-use webrtc::data_channel::data_channel_message::DataChannelMessage;
 use webrtc::ice::candidate::CandidateType;
 use webrtc::ice_transport::ice_candidate::RTCIceCandidate;
 use webrtc::ice_transport::ice_connection_state::RTCIceConnectionState;
@@ -30,13 +30,11 @@ use webrtc::stats::StatsReportType;
 // Constants
 // ============================================================================
 
-/// Mainstream public STUN servers for NAT traversal discovery.
+/// Public STUN servers for NAT traversal. Matches secure-send-web's
+/// `getWebRTCConfig()` so both peers probe the same reflexive candidates.
 const STUN_SERVERS: &[&str] = &[
     "stun:stun.l.google.com:19302",
     "stun:stun1.l.google.com:19302",
-    "stun:stun2.l.google.com:19302",
-    "stun:stun3.l.google.com:19302",
-    "stun:stun4.l.google.com:19302",
     "stun:stun.cloudflare.com:3478",
 ];
 
@@ -78,13 +76,6 @@ impl WebRtcPeer {
         Self::new_with_config(ice_servers).await
     }
 
-    /// Create a new WebRTC peer connection for offline/direct LAN use (no STUN servers)
-    #[allow(dead_code)]
-    pub async fn new_offline() -> Result<Self> {
-        // No ICE servers - only direct host candidates will be used
-        Self::new_with_config(vec![]).await
-    }
-
     /// Internal helper to create peer connection with given ICE servers
     async fn new_with_config(ice_servers: Vec<RTCIceServer>) -> Result<Self> {
         let config = RTCConfiguration {
@@ -101,9 +92,19 @@ impl WebRtcPeer {
         registry = register_default_interceptors(registry, &mut media_engine)
             .context("Failed to register interceptors")?;
 
+        // Allow sending data-channel messages larger than the 64 KiB default so
+        // a full 128 KiB content chunk fits in one message (secure-send-web's
+        // wire format). The peer's advertised max-message-size still bounds us.
+        let mut setting_engine = SettingEngine::default();
+        setting_engine.set_sctp_max_message_size_can_send(SctpMaxMessageSize::Unbounded);
+        // Detach data channels so we own the read loop: the facade's built-in
+        // reader caps messages at 65535 bytes, too small for a 128 KiB chunk.
+        setting_engine.detach_data_channels();
+
         let api = APIBuilder::new()
             .with_media_engine(media_engine)
             .with_interceptor_registry(registry)
+            .with_setting_engine(setting_engine)
             .build();
 
         let peer_connection = Arc::new(
@@ -130,7 +131,7 @@ impl WebRtcPeer {
             })
         }));
 
-        // Set up ICE gathering state handler (for vanilla ICE / offline mode)
+        // Set up ICE gathering state handler for non-trickle signaling.
         peer_connection.on_ice_gathering_state_change(Box::new(move |state| {
             if ice_gathering_tx.send(state).is_err() {
                 // Expected during shutdown when receiver is dropped
@@ -423,316 +424,142 @@ pub struct WebRtcConnectionInfo {
 }
 
 // ============================================================================
-// DataChannelStream - AsyncRead + AsyncWrite adapter for data channels
+// DcMessenger - message-oriented adapter over a detached data channel
 // ============================================================================
+//
+// secure-send-web sends each 128 KiB encrypted chunk as its own binary
+// data-channel message and control signals (DONE:N / ACK) as string messages.
+// The webrtc facade's built-in reader caps messages at 65535 bytes, so we
+// detach the channel (see `open_and_detach`) and run our own read loop with a
+// buffer large enough for a full chunk, preserving message boundaries.
 
 use bytes::Bytes;
-use std::collections::VecDeque;
-use std::future::Future;
-use std::io;
-use std::pin::Pin;
-use std::task::{Context as TaskContext, Poll};
-use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use tokio::sync::oneshot;
+use webrtc::data::data_channel::DataChannel as RawDataChannel;
+use webrtc::data_channel::data_channel_state::RTCDataChannelState;
 
-/// Efficiently drain bytes from a VecDeque into a ReadBuf using bulk copies.
-///
-/// Uses `as_slices()` to get contiguous slices and copies them in at most two
-/// bulk operations instead of byte-by-byte, providing much better performance.
-fn drain_vecdeque_to_readbuf(buffer: &mut VecDeque<u8>, buf: &mut ReadBuf<'_>) -> usize {
-    let to_read = std::cmp::min(buf.remaining(), buffer.len());
-    if to_read == 0 {
-        return 0;
-    }
+/// Receive buffer size for one data-channel message. Matches the
+/// `max-message-size` we advertise (262144), comfortably above a 128 KiB chunk.
+const RECV_BUFFER_SIZE: usize = 256 * 1024;
 
-    let (first, second) = buffer.as_slices();
-
-    if to_read <= first.len() {
-        // All bytes come from the first slice
-        buf.put_slice(&first[..to_read]);
-    } else {
-        // Need bytes from both slices
-        buf.put_slice(first);
-        let remaining = to_read - first.len();
-        buf.put_slice(&second[..remaining]);
-    }
-
-    // Remove the bytes we just copied
-    buffer.drain(..to_read);
-
-    to_read
-}
-/// A stream adapter that wraps a WebRTC data channel to implement AsyncRead + AsyncWrite.
-///
-/// This allows using the common transfer protocol with WebRTC data channels.
-pub struct DataChannelStream {
-    data_channel: Arc<RTCDataChannel>,
-    message_rx: mpsc::Receiver<Vec<u8>>,
-    read_buffer: VecDeque<u8>,
-    closed: Arc<std::sync::atomic::AtomicBool>,
-    close_notify: Arc<tokio::sync::Notify>,
-    /// Tracks if any messages were dropped due to buffer overflow.
-    /// If true, the stream will return an error on the next read to prevent
-    /// silent data corruption in file transfers.
-    messages_dropped: Arc<std::sync::atomic::AtomicBool>,
-    /// Pending write operation result receiver
-    write_pending: Option<tokio::sync::oneshot::Receiver<Result<usize, String>>>,
+/// One received data-channel message: string vs binary is significant to the
+/// transfer protocol (control signals are strings, chunks are binary).
+#[derive(Debug, Clone)]
+pub struct DcMessage {
+    pub is_string: bool,
+    pub data: Bytes,
 }
 
-impl DataChannelStream {
-    /// Create a new DataChannelStream from a data channel.
-    ///
-    /// Sets up the message handler and returns the stream.
-    /// The `open_tx` is signaled when the data channel opens (if provided).
-    pub fn new(
-        data_channel: Arc<RTCDataChannel>,
-        open_tx: Option<tokio::sync::oneshot::Sender<()>>,
-    ) -> Self {
-        let (message_tx, message_rx) = mpsc::channel::<Vec<u8>>(1000);
-        let closed = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let close_notify = Arc::new(tokio::sync::Notify::new());
-        let messages_dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
-
-        let dc_label = data_channel.label().to_string();
-
-        // On open
-        if let Some(open_tx) = open_tx {
-            let label = dc_label.clone();
-            data_channel.on_open(Box::new(move || {
-                eprintln!("Data channel '{}' opened", label);
-                let _ = open_tx.send(());
-                Box::pin(async {})
-            }));
-        }
-
-        // On message - forward to channel synchronously to preserve ordering.
-        // try_send is non-blocking and maintains message order. If the channel
-        // is full (which shouldn't happen with our 1000-message buffer), we set
-        // a flag to surface an error on the next read rather than silently
-        // dropping data which would corrupt file transfers.
-        let tx = message_tx.clone();
-        let dropped_flag = messages_dropped.clone();
-        data_channel.on_message(Box::new(move |msg: DataChannelMessage| {
-            let data = msg.data.to_vec();
-            match tx.try_send(data) {
-                Ok(_) => {}
-                Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-                    // Mark that messages were dropped - the reader will detect this
-                    // and return an error to prevent silent data corruption.
-                    dropped_flag.store(true, std::sync::atomic::Ordering::SeqCst);
-                    log::error!(
-                        "Data channel message buffer full - message dropped. \
-                         Transfer will fail to prevent data corruption."
-                    );
-                }
-                Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
-                    // Expected during shutdown when receiver is dropped
-                    log::trace!("Data channel message receiver closed");
-                }
-            }
-            Box::pin(async {})
-        }));
-
-        // On error
-        let label = dc_label.clone();
-        data_channel.on_error(Box::new(move |err| {
-            log::error!("Data channel '{}' error: {}", label, err);
-            Box::pin(async {})
-        }));
-
-        // On close - mark as closed and notify waiters
-        let closed_flag = closed.clone();
-        let close_notify_flag = close_notify.clone();
-        data_channel.on_close(Box::new(move || {
-            closed_flag.store(true, std::sync::atomic::Ordering::SeqCst);
-            close_notify_flag.notify_waiters();
-            eprintln!("Data channel '{}' closed", dc_label);
-            Box::pin(async {})
-        }));
-
-        Self {
-            data_channel,
-            message_rx,
-            read_buffer: VecDeque::new(),
-            closed,
-            close_notify,
-            messages_dropped,
-            write_pending: None,
-        }
-    }
-
-    /// Check if the data channel is closed
-    pub fn is_closed(&self) -> bool {
-        self.closed.load(std::sync::atomic::Ordering::SeqCst)
-    }
-
-    /// Wait until the data channel is closed.
-    pub async fn closed(&self) {
-        if self.is_closed() {
-            return;
-        }
-        self.close_notify.notified().await;
-    }
-
-    /// Check if any messages were dropped due to buffer overflow.
-    /// If true, the transfer data may be corrupted.
-    fn has_dropped_messages(&self) -> bool {
-        self.messages_dropped
-            .load(std::sync::atomic::Ordering::SeqCst)
-    }
+/// Message-oriented wrapper over a detached [`RawDataChannel`].
+pub struct DcMessenger {
+    raw: Arc<RawDataChannel>,
+    message_rx: mpsc::UnboundedReceiver<DcMessage>,
+    closed: Arc<AtomicBool>,
 }
 
-impl AsyncRead for DataChannelStream {
-    fn poll_read(
-        mut self: Pin<&mut Self>,
-        cx: &mut TaskContext<'_>,
-        buf: &mut ReadBuf<'_>,
-    ) -> Poll<io::Result<()>> {
-        // Check if any messages were dropped - fail fast to prevent silent corruption
-        if self.has_dropped_messages() {
-            return Poll::Ready(Err(io::Error::other(
-                "Data channel buffer overflow - messages were dropped, transfer data corrupted",
-            )));
-        }
+impl DcMessenger {
+    /// Wrap a detached data channel, spawning a read loop that forwards
+    /// discrete messages.
+    pub fn new(raw: Arc<RawDataChannel>) -> Self {
+        let (tx, message_rx) = mpsc::unbounded_channel::<DcMessage>();
+        let closed = Arc::new(AtomicBool::new(false));
 
-        // First, drain any buffered data using bulk copy
-        if !self.read_buffer.is_empty() {
-            let this = self.as_mut().get_mut();
-            drain_vecdeque_to_readbuf(&mut this.read_buffer, buf);
-            return Poll::Ready(Ok(()));
-        }
-
-        // Check if channel is closed
-        if self.is_closed() {
-            return Poll::Ready(Ok(())); // EOF
-        }
-
-        // Poll the receiver directly - we have &mut self so exclusive access
-        let this = self.as_mut().get_mut();
-        match this.message_rx.poll_recv(cx) {
-            Poll::Ready(Some(data)) => {
-                // Buffer the data
-                this.read_buffer.extend(data);
-
-                // Read from buffer using bulk copy
-                drain_vecdeque_to_readbuf(&mut this.read_buffer, buf);
-                Poll::Ready(Ok(()))
-            }
-            Poll::Ready(None) => {
-                // Channel closed - EOF
-                Poll::Ready(Ok(()))
-            }
-            Poll::Pending => Poll::Pending,
-        }
-    }
-}
-
-impl AsyncWrite for DataChannelStream {
-    fn poll_write(
-        mut self: Pin<&mut Self>,
-        cx: &mut TaskContext<'_>,
-        buf: &[u8],
-    ) -> Poll<io::Result<usize>> {
-        if self.is_closed() {
-            return Poll::Ready(Err(io::Error::new(
-                io::ErrorKind::BrokenPipe,
-                "Data channel closed",
-            )));
-        }
-
-        let this = self.as_mut().get_mut();
-
-        // Check if we have a pending write operation
-        if let Some(ref mut pending_rx) = this.write_pending {
-            // Poll the pending operation
-            match Pin::new(pending_rx).poll(cx) {
-                Poll::Ready(Ok(Ok(len))) => {
-                    this.write_pending = None;
-                    return Poll::Ready(Ok(len));
-                }
-                Poll::Ready(Ok(Err(e))) => {
-                    this.write_pending = None;
-                    return Poll::Ready(Err(io::Error::other(e)));
-                }
-                Poll::Ready(Err(_)) => {
-                    // Channel closed unexpectedly
-                    this.write_pending = None;
-                    return Poll::Ready(Err(io::Error::new(
-                        io::ErrorKind::BrokenPipe,
-                        "Write operation cancelled",
-                    )));
-                }
-                Poll::Pending => {
-                    return Poll::Pending;
-                }
-            }
-        }
-
-        // Start a new write operation
-        let data_channel = this.data_channel.clone();
-        let data = Bytes::copy_from_slice(buf);
-        let len = buf.len();
-
-        let (tx, mut rx) = tokio::sync::oneshot::channel();
-
-        // Spawn the send operation
+        let read_raw = raw.clone();
+        let read_closed = closed.clone();
         tokio::spawn(async move {
-            match data_channel.send(&data).await {
-                Ok(_) => {
-                    let _ = tx.send(Ok(len));
-                }
-                Err(e) => {
-                    let _ = tx.send(Err(e.to_string()));
+            let mut buffer = vec![0u8; RECV_BUFFER_SIZE];
+            loop {
+                match read_raw.read_data_channel(&mut buffer).await {
+                    Ok((0, _)) => break, // stream reset / closed
+                    Ok((n, is_string)) => {
+                        let msg = DcMessage {
+                            is_string,
+                            data: Bytes::copy_from_slice(&buffer[..n]),
+                        };
+                        if tx.send(msg).is_err() {
+                            break; // receiver dropped
+                        }
+                    }
+                    Err(e) => {
+                        log::debug!("data channel read ended: {e}");
+                        break;
+                    }
                 }
             }
+            read_closed.store(true, Ordering::SeqCst);
         });
 
-        // Poll immediately to register the waker, then store if still pending
-        match Pin::new(&mut rx).poll(cx) {
-            Poll::Ready(Ok(Ok(len))) => Poll::Ready(Ok(len)),
-            Poll::Ready(Ok(Err(e))) => Poll::Ready(Err(io::Error::other(e))),
-            Poll::Ready(Err(_)) => Poll::Ready(Err(io::Error::new(
-                io::ErrorKind::BrokenPipe,
-                "Write operation cancelled",
-            ))),
-            Poll::Pending => {
-                // Store the receiver for future polls - waker is now registered
-                this.write_pending = Some(rx);
-                Poll::Pending
-            }
+        Self {
+            raw,
+            message_rx,
+            closed,
         }
     }
 
-    fn poll_flush(self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<io::Result<()>> {
-        let this = self.get_mut();
-
-        // Check if there's a pending write operation that needs to complete
-        if let Some(ref mut pending_rx) = this.write_pending {
-            match Pin::new(pending_rx).poll(cx) {
-                Poll::Ready(Ok(Ok(_))) => {
-                    this.write_pending = None;
-                    Poll::Ready(Ok(()))
-                }
-                Poll::Ready(Ok(Err(e))) => {
-                    this.write_pending = None;
-                    Poll::Ready(Err(io::Error::other(e)))
-                }
-                Poll::Ready(Err(_)) => {
-                    this.write_pending = None;
-                    Poll::Ready(Err(io::Error::new(
-                        io::ErrorKind::BrokenPipe,
-                        "Write operation cancelled during flush",
-                    )))
-                }
-                Poll::Pending => Poll::Pending,
-            }
-        } else {
-            // No pending write, flush is complete
-            Poll::Ready(Ok(()))
-        }
+    /// Receive the next message, or `None` once the channel is closed/drained.
+    pub async fn recv(&mut self) -> Option<DcMessage> {
+        self.message_rx.recv().await
     }
 
-    fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut TaskContext<'_>) -> Poll<io::Result<()>> {
-        // We don't close the channel here - the caller manages the lifecycle
-        Poll::Ready(Ok(()))
+    /// Send a binary message (one encrypted chunk).
+    pub async fn send_binary(&self, data: Bytes) -> Result<()> {
+        self.raw
+            .write_data_channel(&data, false)
+            .await
+            .context("Failed to send binary message")?;
+        Ok(())
+    }
+
+    /// Send a text message (a control signal such as `DONE:N` or `ACK`).
+    pub async fn send_text(&self, text: impl Into<String>) -> Result<()> {
+        let bytes = Bytes::from(text.into().into_bytes());
+        self.raw
+            .write_data_channel(&bytes, true)
+            .await
+            .context("Failed to send text message")?;
+        Ok(())
+    }
+
+    /// Number of bytes queued in the SCTP send buffer (for backpressure).
+    pub fn buffered_amount(&self) -> usize {
+        self.raw.buffered_amount()
+    }
+
+    /// Whether the read loop has observed the channel closing.
+    pub fn is_closed(&self) -> bool {
+        self.closed.load(Ordering::SeqCst)
+    }
+}
+
+/// Wait for a data channel to open, then detach it for direct large-message
+/// I/O. Requires `detach_data_channels()` on the setting engine.
+pub async fn open_and_detach(
+    data_channel: Arc<RTCDataChannel>,
+    timeout: Duration,
+) -> Result<Arc<RawDataChannel>> {
+    // Fast path: already open (e.g. an incoming channel that opened before we
+    // attached a handler).
+    if data_channel.ready_state() == RTCDataChannelState::Open {
+        return data_channel
+            .detach()
+            .await
+            .context("Failed to detach data channel");
+    }
+
+    let (tx, rx) = oneshot::channel();
+    let dc = data_channel.clone();
+    data_channel.on_open(Box::new(move || {
+        let dc = dc.clone();
+        Box::pin(async move {
+            let _ = tx.send(dc.detach().await);
+        })
+    }));
+
+    match tokio::time::timeout(timeout, rx).await {
+        Ok(Ok(Ok(raw))) => Ok(raw),
+        Ok(Ok(Err(e))) => Err(e).context("Failed to detach data channel"),
+        Ok(Err(_)) => anyhow::bail!("Data channel open signal was cancelled"),
+        Err(_) => anyhow::bail!("Timed out waiting for the data channel to open"),
     }
 }

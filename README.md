@@ -1,143 +1,97 @@
 # xfer-webrtc
 
-> [!NOTE]
-> This project is still work in progress (0.0.x). No backward compatibility is guaranteed between versions.
+CLI companion for `secure-send-web`.
 
-A secure, cross-platform, single-binary peer-to-peer file transfer tool built on encrypted WebRTC data channels.
+This project is pre-release software. No backward compatibility or legacy
+protocol support is maintained.
 
-## Features
+## What It Does
 
-- **Direct peer-to-peer transfer** — file bytes flow directly between peers over a WebRTC data channel; no server stores or relays your data.
-- **End-to-end encrypted** — all traffic is carried over WebRTC's built-in DTLS encryption.
-- **Single static binary** — one native executable per platform, no runtime, package manager, or dependencies to install.
-- **Cross-platform** — Linux, macOS, and Windows.
-- **Two signaling modes** — online via auto-discovered Nostr relays, or manual copy-paste signaling that needs no relay or third-party signaling service (note: peers still attempt public STUN servers for NAT traversal unless the network blocks them).
-- **Resumable transfers** — interrupted file transfers can resume from where they stopped, using a non-cryptographic xxHash64 checksum to match the partial data against the original file.
-- **NAT traversal** — STUN-based ICE negotiation establishes a direct connection across most networks.
-- **Staleness protection** — xfer codes and manual offers carry a timestamp and expire after a TTL.
+`xfer-webrtc` sends and receives single files with the same wire formats as
+`secure-send-web`:
 
-## Installation
+- Nostr PIN signaling by default, compatible with the web app's Auto Exchange mode.
+- Manual SS03 copy/paste signaling with `--manual`, compatible with the web app's manual exchange codes.
+- WebRTC data-channel transfer using the web app's encrypted chunk protocol.
+- No QR code support in the CLI.
 
-The release installers fetch a native, standalone executable. You only need the binary in your PATH; no runtime dependencies or package managers are required.
+The file bytes flow over the WebRTC data channel. Nostr relays carry only
+encrypted metadata and WebRTC signaling events.
 
-### Quick Install (Linux & macOS)
+## Install
 
 ```bash
-curl -sSL https://andrewtheguy.github.io/xfer-webrtc/install.sh | bash
-```
-
-By default the installer pulls the latest **stable** release. Use `--prerelease` for the newest prerelease, or pass an explicit tag to pin to a specific build. Examples:
-
-```bash
-# Latest prerelease
-curl -sSL https://andrewtheguy.github.io/xfer-webrtc/install.sh | bash -s -- --prerelease
-
-# Pin to a specific tag
-curl -sSL https://andrewtheguy.github.io/xfer-webrtc/install.sh | bash -s 20251210172710
-```
-
-### Quick Install (Windows)
-
-```powershell
-irm https://andrewtheguy.github.io/xfer-webrtc/install.ps1 | iex
-```
-
-By default the PowerShell installer pulls the latest **stable** release. Use `-PreRelease` for the newest prerelease, or pass an explicit tag to pin to a specific build. Examples (args-only parser):
-
-```powershell
-# Latest prerelease
-$env:XFER_INSTALL_ARGS='-PreRelease'; irm https://andrewtheguy.github.io/xfer-webrtc/install.ps1 | iex
-
-# Pin to a specific tag
-$env:XFER_INSTALL_ARGS='20251210172710'; irm https://andrewtheguy.github.io/xfer-webrtc/install.ps1 | iex
-```
-
-### From Source
-
-```bash
-cargo build --release
+cargo build --release --all-features
 ```
 
 ## Usage
 
-Transfers use a **Xfer Code** to establish the connection. The code carries
-signaling metadata for the WebRTC session.
+### Nostr PIN Mode
 
-### Online (Nostr signaling)
-
-The default mode uses Nostr relays for signaling. Relays are auto-discovered
-unless you specify custom Nostr relay URLs.
+Sender:
 
 ```bash
-# Send a file
 xfer-webrtc send /path/to/file
-
-# Use the built-in default relays instead of auto-discovery
-xfer-webrtc send --default-relays /path/to/file
-
-# Use a custom Nostr relay URL (repeat --relay for multiple)
-xfer-webrtc send --relay wss://relay1.example.com --relay wss://relay2.example.com /path/to/file
 ```
 
-If online signaling fails on the sender, the CLI prompts to continue the same
-transfer with manual copy-paste signaling. Press Enter to use that fallback, or
-Ctrl+C to abort.
-
-Receiving:
+The sender prints a 12-character PIN. Enter that PIN in `secure-send-web` or in
+another CLI receiver:
 
 ```bash
-# Receive with the code from the sender
-xfer-webrtc receive <XFER_CODE>
-
-# Or prompt for the code interactively
-xfer-webrtc receive
-
-# Receive into a specific directory
-xfer-webrtc receive <XFER_CODE> --output /path/to/dir
-
-# Disable resumable transfers (don't save partial downloads)
-xfer-webrtc receive <XFER_CODE> --no-resume
+xfer-webrtc receive <PIN>
 ```
 
-### Manual Mode (offline signaling)
-
-Use manual mode when Nostr relays are unavailable and both peers still have
-direct network reachability (for example, same LAN or a routed private/VPN
-path). Offer/answer codes are exchanged by copy-paste. Manual mode removes
-relay signaling only; the CLI still configures public STUN servers for ICE NAT
-traversal when the network allows them.
+To choose an output directory:
 
 ```bash
-# Sender
+xfer-webrtc receive <PIN> --output /path/to/dir
+```
+
+### Manual SS03 Mode
+
+Sender:
+
+```bash
 xfer-webrtc send --manual /path/to/file
-
-# Receiver (auto-detects the manual offer when you paste it)
-xfer-webrtc receive
 ```
 
-The receiver uses the same `receive` command for both modes: paste a xfer code
-for a normal Nostr transfer, or paste a manual offer code and it is detected
-automatically. There is no separate `receive --manual` flag.
+Receiver:
 
-## Common Use Cases
+```bash
+xfer-webrtc receive --manual
+```
 
-- **Send over the internet without exchanging IPs** — use the default online mode; Nostr relays handle signaling while the file flows directly peer-to-peer.
-- **No internet or relays blocked** — use `send --manual` on the sender and plain `receive` on the receiver to exchange signaling by copy-paste over a LAN or routed private/VPN network.
+The sender prints an offer code. The receiver pastes that offer and prints a
+response code. The sender pastes the response, then the WebRTC transfer starts.
 
-See [USE_CASES.md](docs/USE_CASES.md) for detailed scenarios.
+## Protocol Compatibility
 
-For protocol details and wire formats, see [ARCHITECTURE.md](docs/ARCHITECTURE.md).
+The CLI follows `secure-send-web` as the source of truth:
 
-## Security
+- PIN metadata event: Nostr kind `24243`.
+- ACK and WebRTC signal events: Nostr kind `24242`.
+- Default relays match `secure-send-web`.
+- PIN-derived keys use PBKDF2-SHA256 with the same labels for metadata, signals,
+  and P2P content.
+- Manual signaling uses SS03 payloads.
+- File chunks use AES-256-GCM with the 2-byte chunk index as AAD, followed by
+  `DONE:<count>` and receiver `ACK`.
 
-- **Encrypted transport** — the WebRTC data channel runs over DTLS, so all file data is encrypted in transit, with ICE consent checks verifying connectivity for the life of the session.
-- **Encrypted & authenticated signaling (online mode)** — the xfer code carries a random pre-shared key (PSK); both peers derive a per-session AEAD key from the PSK (via HKDF-SHA256 bound to the transfer ID) and seal their SDP/ICE signaling payloads with that derived key (XChaCha20-Poly1305). Relays therefore see only ciphertext, not your network candidate addresses, and an offer or answer that does not decrypt under the derived key is dropped — so a third party who learns the transfer ID and pubkeys from relay traffic cannot forge or read signaling. All security here rests on the secrecy of the code: share it over a trusted channel.
-- **No data on third parties** — file bytes never traverse a relay; only encrypted signaling does. The xfer code carries the transfer ID, sender pubkey, the shared key, relays, and file metadata. (Manual mode has no relay: the offer/answer codes you copy contain the SDP and ICE candidates in the clear, so hand them only to the intended peer.)
-- **Staleness protection** — xfer codes and manual offers include a creation timestamp and expire after a 60-minute TTL (with a small allowance for clock skew), and are validated before the handshake. This bounds how long a leaked code is usable but is not full replay protection: there is no one-time-use nonce, so a valid code can be reused within the TTL.
-- **Resume matching checksum** — transfers carry a non-cryptographic xxHash64 checksum used to match a partial download against the original file when resuming. It is corruption/identity matching for resume, not a cryptographic integrity guarantee, and there is no separate end-to-end hash verification of the fully received file (transport integrity is provided by DTLS).
+## Limits
 
-For the detailed security model, see [ARCHITECTURE.md](docs/ARCHITECTURE.md#security-model).
+- Single-file transfers only.
+- Maximum file size is 100 MiB, matching `secure-send-web`.
+- No resume support.
+- No QR support.
+- No custom relay/discovery mode.
 
-## License
+## Development
 
-MIT
+Run checks with all features:
+
+```bash
+cargo test --all-features
+cargo clippy --all-features
+```
+
+Do not run `cargo fmt` for this repo.
