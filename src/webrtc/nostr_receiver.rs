@@ -26,7 +26,6 @@ use crate::webrtc::common::{DcMessenger, WebRtcPeer, open_and_detach};
 use crate::webrtc::{add_ice_candidate_safely, advertise_max_message_size, candidate_strings};
 
 const CONNECTION_TIMEOUT: Duration = Duration::from_secs(30);
-const WAIT_FOR_SIGNAL_TIMEOUT: Duration = Duration::from_secs(60 * 60);
 const ICE_GATHER_TIMEOUT: Duration = Duration::from_secs(5);
 const ANSWER_RETRY_INTERVAL: Duration = Duration::from_secs(5);
 
@@ -83,6 +82,7 @@ pub async fn receive_file_nostr(pin: &str, output_dir: Option<PathBuf>) -> Resul
     ui::status("Publishing receiver ready ACK to Nostr...");
     client.publish(&ack).await?;
     ui::status_timed("Published receiver ready ACK to Nostr", step.elapsed());
+    let connection_deadline = Instant::now() + CONNECTION_TIMEOUT;
 
     ui::status("Waiting for sender P2P offer...");
     let sender_pubkey = exchange.sender_pubkey;
@@ -108,7 +108,7 @@ pub async fn receive_file_nostr(pin: &str, output_dir: Option<PathBuf>) -> Resul
         }
     }
 
-    tokio::time::timeout(WAIT_FOR_SIGNAL_TIMEOUT, async {
+    tokio::time::timeout(remaining_connection_timeout(connection_deadline)?, async {
         while offer_sdp.is_none() {
             let event = next_event(&mut notifications).await?;
             handle_pre_offer_signal(
@@ -124,7 +124,7 @@ pub async fn receive_file_nostr(pin: &str, output_dir: Option<PathBuf>) -> Resul
         Ok::<(), anyhow::Error>(())
     })
     .await
-    .map_err(|_| anyhow::anyhow!("Timed out waiting for sender offer"))??;
+    .map_err(|_| anyhow::anyhow!("WebRTC connection timeout"))??;
 
     let offer_sdp = offer_sdp.context("missing sender offer")?;
 
@@ -166,7 +166,8 @@ pub async fn receive_file_nostr(pin: &str, output_dir: Option<PathBuf>) -> Resul
     answer_retry.tick().await;
 
     ui::status("Waiting for data channel...");
-    let data_channel_timeout = tokio::time::sleep(CONNECTION_TIMEOUT);
+    let data_channel_timeout =
+        tokio::time::sleep(remaining_connection_timeout(connection_deadline)?);
     tokio::pin!(data_channel_timeout);
     let data_channel = loop {
         tokio::select! {
@@ -198,12 +199,15 @@ pub async fn receive_file_nostr(pin: &str, output_dir: Option<PathBuf>) -> Resul
                 ).await?;
             }
             _ = &mut data_channel_timeout => {
-                bail!("Timed out waiting for data channel");
+                bail!("WebRTC connection timeout");
             }
         }
     };
 
-    let open = open_and_detach(data_channel, CONNECTION_TIMEOUT);
+    let open = open_and_detach(
+        data_channel,
+        remaining_connection_timeout(connection_deadline)?,
+    );
     tokio::pin!(open);
     let raw = loop {
         tokio::select! {
@@ -249,6 +253,14 @@ pub async fn receive_file_nostr(pin: &str, output_dir: Option<PathBuf>) -> Resul
     result?;
     ui::status(&format!("Saved to {}", dest.display()));
     Ok(())
+}
+
+fn remaining_connection_timeout(deadline: Instant) -> Result<Duration> {
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        bail!("WebRTC connection timeout");
+    }
+    Ok(remaining)
 }
 
 async fn find_exchange_event(client: &NostrClient, pin: &str) -> Result<PinExchangeEvent> {

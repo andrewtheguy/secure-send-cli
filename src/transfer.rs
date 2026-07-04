@@ -22,8 +22,8 @@ use crate::webrtc::common::DcMessenger;
 
 /// How long the sender waits for the receiver's `ACK` after `DONE`.
 const ACK_TIMEOUT: Duration = Duration::from_secs(30);
-/// Overall cap on the receive loop, matching the web app.
-const RECEIVE_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+/// Idle/stall window for active P2P transfer activity.
+const STALL_TIMEOUT: Duration = Duration::from_secs(60);
 /// SCTP send-buffer high-water mark for backpressure (matches web's 1 MiB).
 const MAX_BUFFERED: usize = 1024 * 1024;
 /// The chunk index is a 2-byte big-endian field, so valid totals are 0..=65536.
@@ -78,14 +78,18 @@ pub async fn run_sender(
 
         let encrypted = encrypt_chunk(key, &buf[..n], index)?;
 
-        // Backpressure: don't outrun the SCTP send buffer.
-        while messenger.buffered_amount() > MAX_BUFFERED {
-            if messenger.is_closed() {
-                bail!("data channel closed during transfer");
-            }
-            tokio::time::sleep(Duration::from_millis(5)).await;
+        match tokio::time::timeout(
+            STALL_TIMEOUT,
+            send_binary_with_backpressure(messenger, Bytes::from(encrypted)),
+        )
+        .await
+        {
+            Ok(result) => result?,
+            Err(_) => bail!(
+                "Transfer stalled: receiver stopped accepting data within {}s",
+                STALL_TIMEOUT.as_secs()
+            ),
         }
-        messenger.send_binary(Bytes::from(encrypted)).await?;
 
         sent += n as u64;
         chunks_sent += 1;
@@ -106,18 +110,21 @@ pub async fn run_sender(
         );
     }
 
-    // Drain the send buffer so DONE arrives after every chunk.
-    while messenger.buffered_amount() > 0 {
-        if messenger.is_closed() {
-            bail!("data channel closed before completion");
-        }
-        tokio::time::sleep(Duration::from_millis(5)).await;
-    }
-
     messenger.send_text(format!("DONE:{total_chunks}")).await?;
     ui::status("Waiting for receiver acknowledgment...");
 
     wait_for_ack(messenger).await
+}
+
+async fn send_binary_with_backpressure(messenger: &DcMessenger, data: Bytes) -> Result<()> {
+    while messenger.buffered_amount() > MAX_BUFFERED {
+        if messenger.is_closed() {
+            bail!("data channel closed during transfer");
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+
+    messenger.send_binary(data).await
 }
 
 async fn wait_for_ack(messenger: &mut DcMessenger) -> Result<()> {
@@ -166,8 +173,17 @@ pub async fn run_receiver(
     let mut received_bytes: u64 = 0;
     let mut done_signalled = false;
 
-    let result = tokio::time::timeout(RECEIVE_TIMEOUT, async {
-        while let Some(msg) = messenger.recv().await {
+    let result = async {
+        loop {
+            let msg = match tokio::time::timeout(STALL_TIMEOUT, messenger.recv()).await {
+                Ok(Some(msg)) => msg,
+                Ok(None) => break,
+                Err(_) => bail!(
+                    "Transfer stalled: no data received within {}s",
+                    STALL_TIMEOUT.as_secs()
+                ),
+            };
+
             if msg.is_string {
                 let text = String::from_utf8_lossy(&msg.data);
                 if let Some(rest) = text.strip_prefix("DONE:") {
@@ -219,7 +235,7 @@ pub async fn run_receiver(
             ui::progress(Direction::Receive, received_bytes, total_bytes);
         }
         Ok::<(), anyhow::Error>(())
-    })
+    }
     .await;
 
     ui::progress_end();
@@ -230,14 +246,10 @@ pub async fn run_receiver(
     };
 
     match result {
-        Ok(Ok(())) => {}
-        Ok(Err(e)) => {
+        Ok(()) => {}
+        Err(e) => {
             cleanup();
             return Err(e);
-        }
-        Err(_) => {
-            cleanup();
-            bail!("transfer timed out after {} seconds", RECEIVE_TIMEOUT.as_secs());
         }
     }
 
