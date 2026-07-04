@@ -142,6 +142,15 @@ pub fn derive_nostr_transfer_keys(pin: &str, salt: &[u8]) -> Result<NostrTransfe
 }
 
 fn derive_labeled_key(pin: &str, salt: &[u8], label: PinKeyLabel) -> Result<[u8; AES_KEY_LEN]> {
+    derive_labeled_key_with_iterations(pin, salt, label, PBKDF2_ITERATIONS)
+}
+
+fn derive_labeled_key_with_iterations(
+    pin: &str,
+    salt: &[u8],
+    label: PinKeyLabel,
+    iterations: u32,
+) -> Result<[u8; AES_KEY_LEN]> {
     if salt.len() < SALT_LENGTH {
         bail!(
             "salt too short: expected at least {SALT_LENGTH} bytes, got {}",
@@ -156,7 +165,7 @@ fn derive_labeled_key(pin: &str, salt: &[u8], label: PinKeyLabel) -> Result<[u8;
     labeled_salt.extend_from_slice(label.as_bytes());
 
     let mut out = [0u8; AES_KEY_LEN];
-    pbkdf2_hmac::<Sha256>(pin.as_bytes(), &labeled_salt, PBKDF2_ITERATIONS, &mut out);
+    pbkdf2_hmac::<Sha256>(pin.as_bytes(), &labeled_salt, iterations, &mut out);
     Ok(out)
 }
 
@@ -192,8 +201,36 @@ mod tests {
     fn labels_are_domain_separated() {
         let pin = "ABCDEFGHJKL2";
         let salt = [7u8; SALT_LENGTH];
-        let keys = derive_nostr_transfer_keys(pin, &salt).unwrap();
+        let keys = derive_test_transfer_keys(pin, &salt).unwrap();
         assert_ne!(keys.metadata, keys.signals);
         assert_ne!(keys.signals, keys.p2p_content);
+    }
+
+    fn derive_test_transfer_keys(pin: &str, salt: &[u8]) -> Result<NostrTransferKeys> {
+        #[cfg(debug_assertions)]
+        const TEST_PBKDF2_ITERATIONS: u32 = 1;
+        #[cfg(not(debug_assertions))]
+        const TEST_PBKDF2_ITERATIONS: u32 = PBKDF2_ITERATIONS;
+
+        Ok(NostrTransferKeys {
+            metadata: derive_labeled_key_with_iterations(
+                pin,
+                salt,
+                PinKeyLabel::Metadata,
+                TEST_PBKDF2_ITERATIONS,
+            )?,
+            signals: derive_labeled_key_with_iterations(
+                pin,
+                salt,
+                PinKeyLabel::Signals,
+                TEST_PBKDF2_ITERATIONS,
+            )?,
+            p2p_content: derive_labeled_key_with_iterations(
+                pin,
+                salt,
+                PinKeyLabel::P2pContent,
+                TEST_PBKDF2_ITERATIONS,
+            )?,
+        })
     }
 }
