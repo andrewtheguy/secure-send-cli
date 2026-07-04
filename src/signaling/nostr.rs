@@ -1,439 +1,463 @@
-//! Nostr-based WebRTC signaling for webrtc transport
-//!
-//! This module provides WebRTC signaling via Nostr events. It carries encrypted
-//! SDP offer/answer payloads and bundled ICE candidates over Nostr relays.
-//!
-//! Event structure (reuses kind 24242):
-//! - type="webrtc-offer": SDP offer from receiver to sender
-//! - type="webrtc-answer": SDP answer from sender to receiver
+//! Nostr signaling compatible with secure-send-web's Auto Exchange mode.
 
-use anyhow::{Context, Result};
-use base64::{Engine, engine::general_purpose::STANDARD};
+use std::time::Duration;
+
+use anyhow::{Context, Result, bail};
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD;
 use nostr_sdk::prelude::*;
 use serde::{Deserialize, Serialize};
-use tokio::sync::mpsc;
-use tokio::time::Duration;
 
-/// Timeout for relay connections
-const RELAY_CONNECTION_TIMEOUT: Duration = Duration::from_secs(10);
+use crate::crypto::aes;
+use crate::crypto::pin::{NostrTransferKeys, TRANSFER_EXPIRATION_MS, now_sec};
 
-use crate::signaling::crypto::{self, PSK_LEN};
-use crate::signaling::nostr_protocol::{
-    DEFAULT_NOSTR_RELAYS, generate_transfer_id, get_best_relays, nostr_file_transfer_kind,
-};
+pub const DEFAULT_RELAYS: &[&str] = &[
+    "wss://relay.damus.io",
+    "wss://nos.lol",
+    "wss://relay.primal.net",
+    "wss://nostr.rocks",
+    "wss://relay.nostr.pub",
+    "wss://relay.snort.social",
+];
 
-// Signaling event types
-const SIGNALING_TYPE_OFFER: &str = "webrtc-offer";
-const SIGNALING_TYPE_ANSWER: &str = "webrtc-answer";
+const EVENT_KIND_DATA_TRANSFER: u16 = 24242;
+const EVENT_KIND_PIN_EXCHANGE: u16 = 24243;
+const RELAY_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
+const FETCH_TIMEOUT: Duration = Duration::from_secs(10);
+const PUBLISH_RETRIES: usize = 3;
 
-/// SDP payload for offer/answer exchange
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SdpPayload {
-    pub sdp: String,
-    #[serde(rename = "type")]
-    pub sdp_type: String,
-    pub candidates: Vec<IceCandidatePayload>,
+#[serde(rename_all = "camelCase")]
+pub struct PinExchangePayload {
+    pub content_type: String,
+    pub transfer_id: String,
+    pub sender_pubkey: String,
+    pub relays: Vec<String>,
+    pub file_name: String,
+    pub file_size: u64,
+    pub mime_type: String,
 }
 
-/// ICE candidate payload
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct IceCandidatePayload {
-    pub candidate: String,
-    #[serde(rename = "sdpMLineIndex")]
-    pub sdp_m_line_index: Option<u16>,
-    #[serde(rename = "sdpMid")]
-    pub sdp_mid: Option<String>,
-}
-
-/// Signaling message types received from Nostr
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
-pub enum SignalingMessage {
-    Offer {
-        sender_pubkey: PublicKey,
-        sdp: SdpPayload,
-    },
-    Answer {
-        sender_pubkey: PublicKey,
-        sdp: SdpPayload,
+pub struct PinExchangeEvent {
+    pub payload: PinExchangePayload,
+    pub salt: Vec<u8>,
+    pub transfer_id: String,
+    pub sender_pubkey: PublicKey,
+    pub matched_hint: String,
+    pub created_at_ms: u64,
+    pub keys: NostrTransferKeys,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CandidatePayload {
+    pub candidate: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sdp_mid: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sdp_m_line_index: Option<u16>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum Signal {
+    #[serde(rename = "offer")]
+    Offer { sdp: String },
+    #[serde(rename = "answer")]
+    Answer { sdp: String },
+    #[serde(rename = "candidate")]
+    Candidate {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        candidate: Option<CandidatePayload>,
     },
 }
 
-/// Helper to setup client with relays and connect
-///
-/// Creates a Nostr client, adds the specified relays, connects, and waits
-/// for at least one relay to successfully connect. Returns an error if
-/// no relays could be added or connected.
-async fn setup_client_with_relays(keys: &Keys, relay_urls: &[String]) -> Result<Client> {
-    let client = Client::new(keys.clone());
-
-    // Add relays
-    let mut added_relays = 0usize;
-    for relay_url in relay_urls {
-        match client.add_relay(relay_url).await {
-            Ok(_) => {
-                added_relays += 1;
-            }
-            Err(e) => {
-                log::error!("Failed to add relay {}: {}", relay_url, e);
-            }
-        }
-    }
-    if added_relays == 0 {
-        anyhow::bail!("Failed to add any Nostr relays; cannot continue without relays.");
-    }
-
-    // Connect and wait for at least one relay to connect
-    client.connect().await;
-    client.wait_for_connection(RELAY_CONNECTION_TIMEOUT).await;
-
-    // Verify at least one relay connected
-    let relay_statuses = client.relays().await;
-    let connected_count = relay_statuses.values().filter(|r| r.is_connected()).count();
-
-    if connected_count == 0 {
-        anyhow::bail!(
-            "Failed to connect to any Nostr relay within timeout. \
-             Check network connectivity and relay availability."
-        );
-    }
-
-    log::debug!(
-        "Connected to {}/{} Nostr relays",
-        connected_count,
-        relay_statuses.len()
-    );
-
-    Ok(client)
+#[derive(Debug, Serialize, Deserialize)]
+struct SignalEnvelope {
+    #[serde(rename = "type")]
+    payload_type: String,
+    signal: Signal,
 }
 
-/// Nostr signaling client for WebRTC
-pub struct NostrSignaling {
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AckBody {
+    #[serde(rename = "type")]
+    payload_type: String,
+    transfer_id: String,
+    seq: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct AckEvent {
+    pub receiver_pubkey: PublicKey,
+}
+
+#[derive(Debug, Clone)]
+pub struct ParsedSignalEvent {
+    pub event_id: EventId,
+    pub pubkey: PublicKey,
+    pub signal: Signal,
+}
+
+#[derive(Clone)]
+pub struct NostrClient {
     client: Client,
     keys: Keys,
-    transfer_id: String,
-    relay_urls: Vec<String>,
-    /// Shared pre-shared key used to seal/open signaling payloads.
-    psk: [u8; PSK_LEN],
 }
 
-/// Validate that an event belongs to the specified transfer and parse it into a SignalingMessage.
-///
-/// This is a standalone function for use in spawned tasks where we can't use `&self`.
-/// Returns Some(SignalingMessage) if the event has the correct transfer tag and
-/// can be parsed as a valid signaling message, None otherwise.
-fn validate_and_parse_event_with_id(
-    event: &Event,
-    psk: &[u8; PSK_LEN],
-    transfer_id: &str,
-) -> Option<SignalingMessage> {
-    // Check if this is for our transfer
-    let is_our_transfer = event.tags.iter().any(|t| {
-        t.kind() == TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::T))
-            && t.content() == Some(transfer_id)
-    });
-
-    if is_our_transfer {
-        NostrSignaling::parse_signaling_event(event, psk, transfer_id)
-    } else {
-        None
-    }
-}
-
-/// Process an event in the background receiver task.
-///
-/// Validates the event, parses it, and sends to the channel if valid.
-/// Returns `true` if the task should continue, `false` if it should exit
-/// (channel closed).
-async fn process_event_for_receiver(
-    event: &Event,
-    psk: &[u8; PSK_LEN],
-    transfer_id: &str,
-    tx: &mpsc::Sender<SignalingMessage>,
-) -> bool {
-    if let Some(msg) = validate_and_parse_event_with_id(event, psk, transfer_id)
-        && tx.send(msg).await.is_err()
-    {
-        log::debug!("Message receiver channel closed, stopping background task");
-        return false;
-    }
-    true
-}
-
-impl NostrSignaling {
-    /// Create a new Nostr signaling client
-    pub async fn new(custom_relays: Option<Vec<String>>, use_default_relays: bool) -> Result<Self> {
-        let keys = Keys::generate();
-
-        // Determine which relays to use
-        let relay_urls = if let Some(relays) = custom_relays {
-            relays
-        } else if use_default_relays {
-            DEFAULT_NOSTR_RELAYS.iter().map(|s| s.to_string()).collect()
-        } else {
-            get_best_relays().await
-        };
-
-        let client = setup_client_with_relays(&keys, &relay_urls).await?;
-
-        // Generate transfer ID
-        let transfer_id = generate_transfer_id();
-
-        Ok(Self {
-            client,
-            keys,
-            transfer_id,
-            relay_urls,
-            psk: crypto::generate_psk(),
-        })
+impl NostrClient {
+    pub async fn connect(keys: Keys) -> Result<Self> {
+        let client = Client::new(keys.clone());
+        for relay in DEFAULT_RELAYS {
+            client
+                .add_relay(*relay)
+                .await
+                .with_context(|| format!("Failed to add relay {relay}"))?;
+        }
+        client.connect().await;
+        client.wait_for_connection(RELAY_CONNECT_TIMEOUT).await;
+        Ok(Self { client, keys })
     }
 
-    /// Get our public key
     pub fn public_key(&self) -> PublicKey {
         self.keys.public_key()
     }
 
-    /// Get the shared pre-shared key as a hex string (for embedding in the xfer code)
-    pub fn psk_hex(&self) -> String {
-        hex::encode(self.psk)
+    pub fn public_key_hex(&self) -> String {
+        self.keys.public_key().to_hex()
     }
 
-    /// Get the transfer ID
-    pub fn transfer_id(&self) -> &str {
-        &self.transfer_id
-    }
+    pub async fn publish(&self, event: &Event) -> Result<()> {
+        let mut last_failure = String::from("no relay accepted the event");
+        for attempt in 0..PUBLISH_RETRIES {
+            log::debug!(
+                "Publishing Nostr event kind {:?}, attempt {}/{}",
+                event.kind,
+                attempt + 1,
+                PUBLISH_RETRIES
+            );
+            let output = self
+                .client
+                .send_event(event)
+                .await
+                .context("Failed to publish Nostr event")?;
 
-    /// Get the relay URLs
-    pub fn relay_urls(&self) -> &[String] {
-        &self.relay_urls
-    }
+            if !output.success.is_empty() {
+                log::debug!(
+                    "Nostr publish accepted by {} relay(s), failed on {} relay(s)",
+                    output.success.len(),
+                    output.failed.len()
+                );
+                return Ok(());
+            }
 
-    /// Create a signaling event with common tags
-    fn create_signaling_event(
-        &self,
-        peer_pubkey: &PublicKey,
-        event_type: &str,
-        content: &str,
-    ) -> Result<Event> {
-        let tags = vec![
-            Tag::custom(
-                TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::T)),
-                vec![self.transfer_id.clone()],
-            ),
-            Tag::custom(
-                TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::P)),
-                vec![peer_pubkey.to_hex()],
-            ),
-            Tag::custom(TagKind::Custom("type".into()), vec![event_type.to_string()]),
-        ];
-
-        let event = EventBuilder::new(nostr_file_transfer_kind(), content)
-            .tags(tags)
-            .sign_with_keys(&self.keys)?;
-
-        Ok(event)
-    }
-
-    /// Publish an SDP offer
-    pub async fn publish_offer(
-        &self,
-        receiver_pubkey: &PublicKey,
-        sdp: &str,
-        candidates: Vec<IceCandidatePayload>,
-    ) -> Result<()> {
-        let payload = SdpPayload {
-            sdp: sdp.to_string(),
-            sdp_type: "offer".to_string(),
-            candidates,
-        };
-        let sealed = crypto::seal(
-            &self.psk,
-            &self.transfer_id,
-            SIGNALING_TYPE_OFFER,
-            &serde_json::to_vec(&payload)?,
-        )?;
-        let content = STANDARD.encode(sealed);
-
-        let event = self.create_signaling_event(receiver_pubkey, SIGNALING_TYPE_OFFER, &content)?;
-
-        self.client
-            .send_event(&event)
-            .await
-            .context("Failed to publish SDP offer")?;
-
-        Ok(())
-    }
-
-    /// Publish an SDP answer
-    pub async fn publish_answer(
-        &self,
-        sender_pubkey: &PublicKey,
-        sdp: &str,
-        candidates: Vec<IceCandidatePayload>,
-    ) -> Result<()> {
-        let payload = SdpPayload {
-            sdp: sdp.to_string(),
-            sdp_type: "answer".to_string(),
-            candidates,
-        };
-        let sealed = crypto::seal(
-            &self.psk,
-            &self.transfer_id,
-            SIGNALING_TYPE_ANSWER,
-            &serde_json::to_vec(&payload)?,
-        )?;
-        let content = STANDARD.encode(sealed);
-
-        let event = self.create_signaling_event(sender_pubkey, SIGNALING_TYPE_ANSWER, &content)?;
-
-        self.client
-            .send_event(&event)
-            .await
-            .context("Failed to publish SDP answer")?;
-
-        Ok(())
-    }
-
-    /// Subscribe to signaling events for our public key
-    pub async fn subscribe(&self) -> Result<()> {
-        let filter = Filter::new()
-            .kind(nostr_file_transfer_kind())
-            .custom_tag(
-                SingleLetterTag::lowercase(Alphabet::T),
-                self.transfer_id.clone(),
-            )
-            .custom_tag(
-                SingleLetterTag::lowercase(Alphabet::P),
-                self.keys.public_key().to_hex(),
+            last_failure = if output.failed.is_empty() {
+                String::from("no relay accepted the event")
+            } else {
+                output
+                    .failed
+                    .iter()
+                    .map(|(relay, err)| format!("{relay}: {err}"))
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            };
+            log::warn!(
+                "Nostr publish attempt {}/{} was not accepted by any relay: {}",
+                attempt + 1,
+                PUBLISH_RETRIES,
+                last_failure
             );
 
-        self.client
+            if attempt + 1 < PUBLISH_RETRIES {
+                tokio::time::sleep(Duration::from_millis(500 * (1_u64 << attempt))).await;
+            }
+        }
+
+        bail!(
+            "Failed to publish Nostr event to any relay after {PUBLISH_RETRIES} attempts: {last_failure}"
+        );
+    }
+
+    pub async fn subscribe(&self, filter: Filter) -> Result<SubscriptionId> {
+        Ok(self
+            .client
             .subscribe(filter, None)
             .await
-            .context("Failed to subscribe to signaling events")?;
-
-        Ok(())
+            .context("Failed to subscribe to Nostr events")?
+            .val)
     }
 
-    /// Parse a signaling event into a SignalingMessage.
-    ///
-    /// The payload is sealed with the shared PSK, so decryption success is what
-    /// authenticates the message: an event that does not open under our PSK
-    /// (forged, tampered, or for another transfer) is dropped by returning None.
-    fn parse_signaling_event(
-        event: &Event,
-        psk: &[u8; PSK_LEN],
-        transfer_id: &str,
-    ) -> Option<SignalingMessage> {
-        // Get event type
-        let event_type = event
-            .tags
-            .iter()
-            .find(|t| t.kind() == TagKind::Custom(std::borrow::Cow::Borrowed("type")))
-            .and_then(|t| t.content())?;
-
-        match event_type {
-            SIGNALING_TYPE_OFFER => {
-                let decoded = STANDARD.decode(&event.content).ok()?;
-                let plaintext = crypto::open(psk, transfer_id, SIGNALING_TYPE_OFFER, &decoded)?;
-                let payload: SdpPayload = serde_json::from_slice(&plaintext).ok()?;
-                Some(SignalingMessage::Offer {
-                    sender_pubkey: event.pubkey,
-                    sdp: payload,
-                })
-            }
-            SIGNALING_TYPE_ANSWER => {
-                let decoded = STANDARD.decode(&event.content).ok()?;
-                let plaintext = crypto::open(psk, transfer_id, SIGNALING_TYPE_ANSWER, &decoded)?;
-                let payload: SdpPayload = serde_json::from_slice(&plaintext).ok()?;
-                Some(SignalingMessage::Answer {
-                    sender_pubkey: event.pubkey,
-                    sdp: payload,
-                })
-            }
-            _ => None,
-        }
+    pub async fn unsubscribe(&self, id: &SubscriptionId) {
+        self.client.unsubscribe(id).await;
     }
 
-    /// Start a message receiver task that sends messages to a channel
-    pub fn start_message_receiver(
-        &self,
-    ) -> (
-        mpsc::Receiver<SignalingMessage>,
-        tokio::task::JoinHandle<()>,
-    ) {
-        let (tx, rx) = mpsc::channel(100);
-        let client = self.client.clone();
-        let transfer_id = self.transfer_id.clone();
-        let psk = self.psk;
-
-        let handle = tokio::spawn(async move {
-            let mut notifications = client.notifications();
-
-            loop {
-                match notifications.recv().await {
-                    Ok(RelayPoolNotification::Event { event, .. }) => {
-                        if !process_event_for_receiver(&event, &psk, &transfer_id, &tx).await {
-                            break;
-                        }
-                    }
-                    Ok(RelayPoolNotification::Message { message, .. }) => {
-                        // Handle Event messages that come through as Message notifications
-                        if let nostr_sdk::RelayMessage::Event { event, .. } = message
-                            && !process_event_for_receiver(&event, &psk, &transfer_id, &tx).await
-                        {
-                            break;
-                        }
-                    }
-                    Ok(_) => continue,
-                    Err(e) => {
-                        log::warn!(
-                            "Nostr relay notification stream error, stopping receiver: {}",
-                            e
-                        );
-                        break;
-                    }
-                }
-            }
-        });
-
-        (rx, handle)
+    pub fn notifications(&self) -> tokio::sync::broadcast::Receiver<RelayPoolNotification> {
+        self.client.notifications()
     }
 
-    /// Disconnect from relays
+    pub async fn fetch(&self, filter: Filter) -> Result<Vec<Event>> {
+        let events = self
+            .client
+            .fetch_events(filter, FETCH_TIMEOUT)
+            .await
+            .context("Failed to fetch Nostr events")?;
+        Ok(events.into_iter().collect())
+    }
+
     pub async fn disconnect(&self) {
         self.client.disconnect().await;
     }
+
+    pub fn sign(&self, builder: EventBuilder) -> Result<Event> {
+        builder
+            .sign_with_keys(&self.keys)
+            .context("Failed to sign Nostr event")
+    }
 }
 
-/// Create a NostrSignaling for sender side
-pub async fn create_sender_signaling(
-    custom_relays: Option<Vec<String>>,
-    use_default_relays: bool,
-) -> Result<NostrSignaling> {
-    let signaling = NostrSignaling::new(custom_relays, use_default_relays).await?;
-    signaling.subscribe().await?;
-    Ok(signaling)
+pub fn data_kind() -> Kind {
+    Kind::from_u16(EVENT_KIND_DATA_TRANSFER)
 }
 
-/// Create a NostrSignaling for receiver side with existing transfer info
-pub async fn create_receiver_signaling(
+pub fn pin_exchange_kind() -> Kind {
+    Kind::from_u16(EVENT_KIND_PIN_EXCHANGE)
+}
+
+pub fn default_relays_vec() -> Vec<String> {
+    DEFAULT_RELAYS.iter().map(|relay| (*relay).to_string()).collect()
+}
+
+pub fn create_pin_exchange_event(
+    client: &NostrClient,
+    encrypted_payload: &[u8],
+    salt: &[u8],
     transfer_id: &str,
-    relay_urls: Vec<String>,
-    psk: [u8; PSK_LEN],
-) -> Result<NostrSignaling> {
-    let keys = Keys::generate();
-    let client = setup_client_with_relays(&keys, &relay_urls).await?;
+    hint: &str,
+) -> Result<Event> {
+    let expiration = now_sec() + (TRANSFER_EXPIRATION_MS / 1000);
+    let tags = vec![
+        tag("h", hint)?,
+        tag("s", STANDARD.encode(salt))?,
+        tag("t", transfer_id)?,
+        tag("type", "pin_exchange")?,
+        tag("expiration", expiration.to_string())?,
+    ];
 
-    let signaling = NostrSignaling {
-        client,
-        keys,
+    client.sign(
+        EventBuilder::new(pin_exchange_kind(), STANDARD.encode(encrypted_payload)).tags(tags),
+    )
+}
+
+pub fn parse_pin_exchange_event(event: &Event) -> Option<(String, Vec<u8>, String, Vec<u8>)> {
+    if event.kind != pin_exchange_kind() {
+        return None;
+    }
+
+    let hint = tag_value(event, "h")?.to_string();
+    let salt = STANDARD.decode(tag_value(event, "s")?).ok()?;
+    let transfer_id = tag_value(event, "t")?.to_string();
+    let encrypted_payload = STANDARD.decode(&event.content).ok()?;
+    Some((hint, salt, transfer_id, encrypted_payload))
+}
+
+pub fn create_authenticated_ack_event(
+    client: &NostrClient,
+    sender_pubkey: &PublicKey,
+    transfer_id: &str,
+    seq: i64,
+    key: &[u8; aes::AES_KEY_LEN],
+    hint: Option<&str>,
+) -> Result<Event> {
+    let body = AckBody {
+        payload_type: "ack".to_string(),
         transfer_id: transfer_id.to_string(),
-        relay_urls,
-        psk,
+        seq,
     };
+    let encrypted = aes::encrypt(key, &serde_json::to_vec(&body)?)?;
 
-    signaling.subscribe().await?;
+    let mut tags = vec![
+        tag("p", sender_pubkey.to_hex())?,
+        tag("t", transfer_id)?,
+        tag("seq", seq.to_string())?,
+        tag("type", "ack")?,
+    ];
+    if let Some(hint) = hint {
+        tags.push(tag("h", hint)?);
+    }
 
-    Ok(signaling)
+    client.sign(EventBuilder::new(data_kind(), STANDARD.encode(encrypted)).tags(tags))
+}
+
+pub fn parse_ack_event(
+    event: &Event,
+    key: &[u8; aes::AES_KEY_LEN],
+    expected_transfer_id: &str,
+    expected_seq: i64,
+) -> Option<AckEvent> {
+    if event.kind != data_kind() || tag_value(event, "type")? != "ack" {
+        return None;
+    }
+    if tag_value(event, "t")? != expected_transfer_id {
+        return None;
+    }
+    let seq = tag_value(event, "seq")?.parse::<i64>().ok()?;
+    if seq != expected_seq {
+        return None;
+    }
+
+    let encrypted = STANDARD.decode(&event.content).ok()?;
+    let decrypted = aes::decrypt(key, &encrypted).ok()?;
+    let body: AckBody = serde_json::from_slice(&decrypted).ok()?;
+    if body.payload_type != "ack"
+        || body.transfer_id != expected_transfer_id
+        || body.seq != expected_seq
+    {
+        return None;
+    }
+
+    Some(AckEvent {
+        receiver_pubkey: event.pubkey,
+    })
+}
+
+pub fn create_signal_event(
+    client: &NostrClient,
+    sender_pubkey: &PublicKey,
+    transfer_id: &str,
+    signal: Signal,
+    key: &[u8; aes::AES_KEY_LEN],
+) -> Result<Event> {
+    let envelope = SignalEnvelope {
+        payload_type: "signal".to_string(),
+        signal,
+    };
+    let encrypted = aes::encrypt(key, &serde_json::to_vec(&envelope)?)?;
+    let tags = vec![
+        tag("t", transfer_id)?,
+        tag("p", sender_pubkey.to_hex())?,
+        tag("type", "signal")?,
+    ];
+
+    client.sign(
+        EventBuilder::new(data_kind(), STANDARD.encode(encrypted))
+            .tags(tags)
+            .allow_self_tagging(),
+    )
+}
+
+pub fn parse_signal_event(
+    event: &Event,
+    key: &[u8; aes::AES_KEY_LEN],
+    expected_transfer_id: &str,
+) -> Option<ParsedSignalEvent> {
+    if event.kind != data_kind() || tag_value(event, "type")? != "signal" {
+        return None;
+    }
+    if tag_value(event, "t")? != expected_transfer_id {
+        return None;
+    }
+
+    let encrypted = STANDARD.decode(&event.content).ok()?;
+    let decrypted = aes::decrypt(key, &encrypted).ok()?;
+    let envelope: SignalEnvelope = serde_json::from_slice(&decrypted).ok()?;
+    if envelope.payload_type != "signal" {
+        return None;
+    }
+
+    Some(ParsedSignalEvent {
+        event_id: event.id,
+        pubkey: event.pubkey,
+        signal: envelope.signal,
+    })
+}
+
+pub fn ack_filter(transfer_id: &str, sender_pubkey: &PublicKey) -> Filter {
+    Filter::new()
+        .kind(data_kind())
+        .custom_tag(SingleLetterTag::lowercase(Alphabet::T), transfer_id)
+        .custom_tag(SingleLetterTag::lowercase(Alphabet::P), sender_pubkey.to_hex())
+}
+
+pub fn pin_exchange_filter(hints: &[String]) -> Filter {
+    Filter::new()
+        .kind(pin_exchange_kind())
+        .custom_tags(SingleLetterTag::lowercase(Alphabet::H), hints.iter().cloned())
+        .limit(10)
+}
+
+pub fn signal_filter(transfer_id: &str, sender_pubkey: &PublicKey) -> Filter {
+    Filter::new()
+        .kind(data_kind())
+        .custom_tag(SingleLetterTag::lowercase(Alphabet::T), transfer_id)
+        .custom_tag(SingleLetterTag::lowercase(Alphabet::P), sender_pubkey.to_hex())
+}
+
+pub fn signal_filter_from_author(
+    transfer_id: &str,
+    sender_pubkey: &PublicKey,
+    author: PublicKey,
+) -> Filter {
+    signal_filter(transfer_id, sender_pubkey).author(author)
+}
+
+pub fn signal_filter_from_sender(transfer_id: &str, sender_pubkey: PublicKey) -> Filter {
+    Filter::new()
+        .kind(data_kind())
+        .custom_tag(SingleLetterTag::lowercase(Alphabet::T), transfer_id)
+        .author(sender_pubkey)
+}
+
+fn tag(name: &str, value: impl Into<String>) -> Result<Tag> {
+    Tag::parse([name.to_string(), value.into()]).context("invalid Nostr tag")
+}
+
+fn tag_value<'a>(event: &'a Event, name: &str) -> Option<&'a str> {
+    event
+        .tags
+        .iter()
+        .find(|tag| tag.as_slice().first().is_some_and(|k| k == name))
+        .and_then(|tag| tag.content())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn signal_event_preserves_sender_self_p_tag() {
+        let keys = Keys::generate();
+        let client = NostrClient {
+            client: Client::new(keys.clone()),
+            keys: keys.clone(),
+        };
+        let key = [7_u8; aes::AES_KEY_LEN];
+        let event = create_signal_event(
+            &client,
+            &keys.public_key(),
+            "transfer-id",
+            Signal::Offer {
+                sdp: "v=0\r\n".to_string(),
+            },
+            &key,
+        )
+        .expect("signal event");
+
+        let sender = keys.public_key().to_hex();
+        assert_eq!(tag_value(&event, "p"), Some(sender.as_str()));
+        assert!(parse_signal_event(&event, &key, "transfer-id").is_some());
+    }
+
+    #[test]
+    fn sender_offer_filter_matches_web_receiver_shape() {
+        let sender = Keys::generate().public_key();
+        let value = serde_json::to_value(signal_filter_from_sender("transfer-id", sender))
+            .expect("filter json");
+
+        assert_eq!(value["kinds"], serde_json::json!([EVENT_KIND_DATA_TRANSFER]));
+        assert_eq!(value["#t"], serde_json::json!(["transfer-id"]));
+        assert_eq!(value["authors"], serde_json::json!([sender.to_hex()]));
+        assert!(value.get("#p").is_none());
+    }
 }

@@ -1,6 +1,6 @@
 [package]
 name = "xfer-webrtc"
-version = "0.0.5"
+version = "0.0.6"
 edition = "2024"
 publish = false
 
@@ -19,22 +19,21 @@ anyhow = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 base64 = "0.22"
-hex = "0.4"
-rand = "0.9"
-futures = "0.3"
 log = "0.4"
 rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs"] }
 
-# File handling
-xxhash-rust = { version = "0.8", features = ["xxh64"] }
+# Randomness (nonces, salts, ECDH scalars, PINs)
+getrandom = "0.2"
 
-# HTTP client for relay fetching
-reqwest = { version = "0.13", features = ["json", "multipart", "stream"] }
-
-# Signaling payload encryption (shared-secret AEAD over the Nostr online path)
-chacha20poly1305 = "0.10"
+# secure-send-web compatible crypto
+aes-gcm = "0.10"
+p256 = { version = "0.13", features = ["ecdh"] }
 hkdf = "0.12"
+pbkdf2 = "0.12"
 sha2 = "0.10"
+
+# Manual SS03 signaling payload compression
+flate2 = "1"
 
 # Nostr signaling
 nostr-sdk = "0.44.1"
@@ -42,7 +41,6 @@ nostr-sdk = "0.44.1"
 # WebRTC transport
 webrtc = "0.17"
 bytes = "1"
-crc32fast = "1.4"
 
 # CLI (interactive prompts + arg parsing)
 rustyline = "18"

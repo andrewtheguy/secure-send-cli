@@ -1,11 +1,68 @@
-//! WebRTC transport module for peer-to-peer file transfer
+//! WebRTC transport for peer-to-peer file transfer.
 
 pub mod common;
-pub mod offline_receiver;
-pub mod offline_sender;
-pub mod receiver;
-pub mod sender;
+pub mod manual_receiver;
+pub mod manual_sender;
+pub mod nostr_receiver;
+pub mod nostr_sender;
 
-pub use offline_receiver::receive_file_offline;
-pub use receiver::receive_webrtc;
-pub use sender::send_file_webrtc;
+pub use manual_receiver::receive_file_manual;
+pub use manual_sender::send_file_manual;
+pub use nostr_receiver::receive_file_nostr;
+pub use nostr_sender::send_file_nostr;
+
+use anyhow::Result;
+use webrtc::ice_transport::ice_candidate::{RTCIceCandidate, RTCIceCandidateInit};
+
+use crate::webrtc::common::WebRtcPeer;
+
+/// Serialize gathered ICE candidates to their SDP `candidate:` strings - the
+/// only field secure-send-web transmits and reads.
+pub(crate) fn candidate_strings(candidates: Vec<RTCIceCandidate>) -> Result<Vec<String>> {
+    candidates
+        .iter()
+        .map(|c| Ok(c.to_json()?.candidate))
+        .collect()
+}
+
+/// Rebuild an ICE candidate init from a candidate string. secure-send-web
+/// applies received candidates with `sdpMid:"0"`, `sdpMLineIndex:0` (the single
+/// data-channel m-section), so we do the same.
+pub(crate) fn candidate_init(candidate: &str) -> RTCIceCandidateInit {
+    RTCIceCandidateInit {
+        candidate: candidate.to_string(),
+        sdp_mid: Some("0".to_string()),
+        sdp_mline_index: Some(0),
+        username_fragment: None,
+    }
+}
+
+/// Match secure-send-web's candidate handling: malformed, duplicate, or stale
+/// candidates should not abort an otherwise viable WebRTC connection attempt.
+pub(crate) async fn add_ice_candidate_safely(peer: &WebRtcPeer, candidate: &str) {
+    if let Err(err) = peer.add_ice_candidate(candidate_init(candidate)).await {
+        log::warn!("Ignoring ICE candidate error: {err:#}");
+    }
+}
+
+/// Ensure our outgoing SDP advertises a data-channel `max-message-size` large
+/// enough for a full 128 KiB content chunk. webrtc-rs omits this attribute,
+/// which would otherwise cap a browser peer's sends at the 64 KiB default and
+/// break browser-to-CLI transfers. Matches browsers, which advertise 262144.
+pub(crate) fn advertise_max_message_size(sdp: String) -> String {
+    if sdp.contains("max-message-size") {
+        return sdp;
+    }
+    let attr = "a=max-message-size:262144\r\n";
+    let mut out = String::with_capacity(sdp.len() + attr.len());
+    let mut inserted = false;
+    for line in sdp.split_inclusive("\r\n") {
+        out.push_str(line);
+        // Insert after the sctp-port attribute so a= lines stay grouped.
+        if !inserted && line.starts_with("a=sctp-port") {
+            out.push_str(attr);
+            inserted = true;
+        }
+    }
+    if inserted { out } else { sdp }
+}

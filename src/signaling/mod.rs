@@ -1,10 +1,4 @@
-//! Signaling: xfer-code/Nostr protocol encoding plus WebRTC transport signaling.
+//! Signaling: exchanging WebRTC offers/answers between peers.
 
-pub mod nostr_protocol;
-
-#[cfg(test)]
-mod nostr_protocol_test;
-
-pub mod crypto;
+pub mod manual;
 pub mod nostr;
-pub mod offline;

@@ -1,10 +1,12 @@
-//! xfer-webrtc: WebRTC transport for peer-to-peer file transfer.
+//! xfer-webrtc: CLI companion to secure-send-web for peer-to-peer file transfer.
 //!
-//! This crate provides the core transfer and signaling functionality along
-//! with the WebRTC data-channel transport. The `xfer-webrtc` binary is a
-//! thin wrapper over this library.
+//! This crate re-implements secure-send-web's crypto and wire formats so files
+//! can be transferred between the CLI and the browser app over a WebRTC data
+//! channel. Nostr PIN mode and manual SS03 copy/paste mode are both supported.
 
-pub mod core;
+pub mod crypto;
 pub mod signaling;
+pub mod transfer;
 pub mod ui;
+pub mod util;
 pub mod webrtc;
