@@ -26,6 +26,8 @@ const ACK_TIMEOUT: Duration = Duration::from_secs(30);
 const RECEIVE_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 /// SCTP send-buffer high-water mark for backpressure (matches web's 1 MiB).
 const MAX_BUFFERED: usize = 1024 * 1024;
+/// The chunk index is a 2-byte big-endian field, so valid totals are 0..=65536.
+const MAX_CHUNKS: u64 = 0x10000;
 
 /// Number of 128 KiB chunks needed for `total_bytes` (files are non-empty).
 fn chunk_count(total_bytes: u64) -> u64 {
@@ -59,12 +61,13 @@ pub async fn run_sender(
     total_bytes: u64,
 ) -> Result<()> {
     let total_chunks = chunk_count(total_bytes);
-    if total_chunks > u16::MAX as u64 {
-        bail!("file too large: {total_chunks} chunks exceeds protocol limit of 65535");
+    if total_chunks > MAX_CHUNKS {
+        bail!("file too large: {total_chunks} chunks exceeds protocol limit of {MAX_CHUNKS}");
     }
 
     let mut buf = vec![0u8; ENCRYPTION_CHUNK_SIZE];
     let mut index: u16 = 0;
+    let mut chunks_sent: u64 = 0;
     let mut sent: u64 = 0;
 
     loop {
@@ -84,19 +87,22 @@ pub async fn run_sender(
         }
         messenger.send_binary(Bytes::from(encrypted)).await?;
 
-        index += 1;
         sent += n as u64;
+        chunks_sent += 1;
         ui::progress(Direction::Send, sent, total_bytes);
 
-        if n < ENCRYPTION_CHUNK_SIZE {
+        if sent == total_bytes {
             break;
         }
+        index = index
+            .checked_add(1)
+            .context("chunk index exceeded protocol range")?;
     }
     ui::progress_end();
 
-    if index as u64 != total_chunks {
+    if chunks_sent != total_chunks {
         bail!(
-            "internal error: sent {index} chunks but expected {total_chunks} for {sent} bytes"
+            "internal error: sent {chunks_sent} chunks but expected {total_chunks} for {sent} bytes"
         );
     }
 
@@ -165,10 +171,8 @@ pub async fn run_receiver(
             if msg.is_string {
                 let text = String::from_utf8_lossy(&msg.data);
                 if let Some(rest) = text.strip_prefix("DONE:") {
-                    let n: u64 = rest
-                        .trim()
-                        .parse()
-                        .map_err(|_| anyhow::anyhow!("invalid DONE message: {text:?}"))?;
+                    let n = parse_done_count(rest)
+                        .with_context(|| format!("invalid DONE message: {text:?}"))?;
                     if n != expected_chunks {
                         bail!("sender reported {n} chunks, expected {expected_chunks}");
                     }
@@ -260,4 +264,25 @@ pub async fn run_receiver(
     // Only acknowledge after the file is fully authenticated and persisted.
     messenger.send_text("ACK").await?;
     Ok(())
+}
+
+fn parse_done_count(count: &str) -> Result<u64> {
+    if count.is_empty() || !count.bytes().all(|byte| byte.is_ascii_digit()) {
+        bail!("non-numeric chunk count");
+    }
+    count.parse().context("chunk count out of range")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_done_count;
+
+    #[test]
+    fn done_count_accepts_digits_only() {
+        assert_eq!(parse_done_count("0").unwrap(), 0);
+        assert_eq!(parse_done_count("42").unwrap(), 42);
+        assert!(parse_done_count("").is_err());
+        assert!(parse_done_count("42 ").is_err());
+        assert!(parse_done_count("42x").is_err());
+    }
 }
