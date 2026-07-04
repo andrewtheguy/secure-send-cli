@@ -84,6 +84,12 @@ The receiver authenticates and persists the full file, then replies:
 ACK
 ```
 
+Active P2P transfers use a 60-second idle/stall window rather than an overall
+wall-clock deadline. The sender applies the window to each chunk hand-off while
+waiting for WebRTC backpressure to clear and sending the message. The receiver
+arms the same window once the data channel is open and resets it for every
+incoming data-channel message, including `DONE:<total_chunks>`.
+
 ## Scope
 
 The CLI intentionally has no legacy xfer-code protocol, no resume path, no QR
