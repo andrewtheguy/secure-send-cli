@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use nostr_sdk::prelude::*;
@@ -24,6 +24,7 @@ const EVENT_KIND_DATA_TRANSFER: u16 = 24242;
 const EVENT_KIND_PIN_EXCHANGE: u16 = 24243;
 const RELAY_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 const FETCH_TIMEOUT: Duration = Duration::from_secs(10);
+const PUBLISH_RETRIES: usize = 3;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -129,11 +130,37 @@ impl NostrClient {
     }
 
     pub async fn publish(&self, event: &Event) -> Result<()> {
-        self.client
-            .send_event(event)
-            .await
-            .context("Failed to publish Nostr event")?;
-        Ok(())
+        let mut last_failure = String::from("no relay accepted the event");
+        for attempt in 0..PUBLISH_RETRIES {
+            let output = self
+                .client
+                .send_event(event)
+                .await
+                .context("Failed to publish Nostr event")?;
+
+            if !output.success.is_empty() {
+                return Ok(());
+            }
+
+            last_failure = if output.failed.is_empty() {
+                String::from("no relay accepted the event")
+            } else {
+                output
+                    .failed
+                    .iter()
+                    .map(|(relay, err)| format!("{relay}: {err}"))
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            };
+
+            if attempt + 1 < PUBLISH_RETRIES {
+                tokio::time::sleep(Duration::from_millis(500 * (1_u64 << attempt))).await;
+            }
+        }
+
+        bail!(
+            "Failed to publish Nostr event to any relay after {PUBLISH_RETRIES} attempts: {last_failure}"
+        );
     }
 
     pub async fn subscribe(&self, filter: Filter) -> Result<SubscriptionId> {
@@ -296,7 +323,11 @@ pub fn create_signal_event(
         tag("type", "signal")?,
     ];
 
-    client.sign(EventBuilder::new(data_kind(), STANDARD.encode(encrypted)).tags(tags))
+    client.sign(
+        EventBuilder::new(data_kind(), STANDARD.encode(encrypted))
+            .tags(tags)
+            .allow_self_tagging(),
+    )
 }
 
 pub fn parse_signal_event(
@@ -354,6 +385,13 @@ pub fn signal_filter_from_author(
     signal_filter(transfer_id, sender_pubkey).author(author)
 }
 
+pub fn signal_filter_from_sender(transfer_id: &str, sender_pubkey: PublicKey) -> Filter {
+    Filter::new()
+        .kind(data_kind())
+        .custom_tag(SingleLetterTag::lowercase(Alphabet::T), transfer_id)
+        .author(sender_pubkey)
+}
+
 fn tag(name: &str, value: impl Into<String>) -> Result<Tag> {
     Tag::parse([name.to_string(), value.into()]).context("invalid Nostr tag")
 }
@@ -364,4 +402,45 @@ fn tag_value<'a>(event: &'a Event, name: &str) -> Option<&'a str> {
         .iter()
         .find(|tag| tag.as_slice().first().is_some_and(|k| k == name))
         .and_then(|tag| tag.content())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn signal_event_preserves_sender_self_p_tag() {
+        let keys = Keys::generate();
+        let client = NostrClient {
+            client: Client::new(keys.clone()),
+            keys: keys.clone(),
+        };
+        let key = [7_u8; aes::AES_KEY_LEN];
+        let event = create_signal_event(
+            &client,
+            &keys.public_key(),
+            "transfer-id",
+            Signal::Offer {
+                sdp: "v=0\r\n".to_string(),
+            },
+            &key,
+        )
+        .expect("signal event");
+
+        let sender = keys.public_key().to_hex();
+        assert_eq!(tag_value(&event, "p"), Some(sender.as_str()));
+        assert!(parse_signal_event(&event, &key, "transfer-id").is_some());
+    }
+
+    #[test]
+    fn sender_offer_filter_matches_web_receiver_shape() {
+        let sender = Keys::generate().public_key();
+        let value = serde_json::to_value(signal_filter_from_sender("transfer-id", sender))
+            .expect("filter json");
+
+        assert_eq!(value["kinds"], serde_json::json!([EVENT_KIND_DATA_TRANSFER]));
+        assert_eq!(value["#t"], serde_json::json!(["transfer-id"]));
+        assert_eq!(value["authors"], serde_json::json!([sender.to_hex()]));
+        assert!(value.get("#p").is_none());
+    }
 }

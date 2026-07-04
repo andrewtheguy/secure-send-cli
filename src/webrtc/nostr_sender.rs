@@ -25,11 +25,12 @@ use crate::transfer::run_sender;
 use crate::ui;
 use crate::util::format_bytes;
 use crate::webrtc::common::{DcMessenger, WebRtcPeer, open_and_detach};
-use crate::webrtc::{advertise_max_message_size, candidate_init, candidate_strings};
+use crate::webrtc::{add_ice_candidate_safely, advertise_max_message_size, candidate_strings};
 
 const WAIT_FOR_RECEIVER_TIMEOUT: Duration = Duration::from_secs(60 * 60);
 const CONNECTION_TIMEOUT: Duration = Duration::from_secs(30);
 const ICE_GATHER_TIMEOUT: Duration = Duration::from_secs(5);
+const OFFER_RETRY_INTERVAL: Duration = Duration::from_secs(5);
 
 pub async fn send_file_nostr(path: &Path) -> Result<()> {
     let metadata = tokio::fs::metadata(path)
@@ -109,37 +110,23 @@ pub async fn send_file_nostr(path: &Path) -> Result<()> {
 
     ui::status("Gathering network candidates...");
     let candidates = peer.gather_ice_candidates(ICE_GATHER_TIMEOUT).await?;
+    let offer_sdp = advertise_max_message_size(offer.sdp);
+    let candidates = candidate_strings(candidates)?;
 
     let signal_filter = signal_filter_from_author(&transfer_id, &sender_pubkey, receiver_pubkey);
     let mut notifications = client.notifications();
     let sub_id = client.subscribe(signal_filter.clone()).await?;
 
-    publish_signal(
+    ui::status("Publishing P2P offer...");
+    publish_offer_and_candidates(
         &client,
         &sender_pubkey,
         &transfer_id,
-        Signal::Offer {
-            sdp: advertise_max_message_size(offer.sdp),
-        },
+        &offer_sdp,
+        &candidates,
         &keys.signals,
     )
     .await?;
-    for candidate in candidate_strings(candidates)? {
-        publish_signal(
-            &client,
-            &sender_pubkey,
-            &transfer_id,
-            Signal::Candidate {
-                candidate: Some(CandidatePayload {
-                    candidate,
-                    sdp_mid: Some("0".to_string()),
-                    sdp_m_line_index: Some(0),
-                }),
-            },
-            &keys.signals,
-        )
-        .await?;
-    }
 
     let peer = Arc::new(peer);
     let mut seen = HashSet::new();
@@ -160,20 +147,38 @@ pub async fn send_file_nostr(path: &Path) -> Result<()> {
         .await?;
     }
 
+    ui::status("Waiting for WebRTC answer...");
     tokio::time::timeout(CONNECTION_TIMEOUT, async {
+        let mut retry_interval = tokio::time::interval(OFFER_RETRY_INTERVAL);
+        retry_interval.tick().await;
+
         while !answer_set {
-            let event = next_event(&mut notifications).await?;
-            handle_sender_signal(
-                &event,
-                &mut seen,
-                &peer,
-                &keys.signals,
-                &transfer_id,
-                receiver_pubkey,
-                &mut answer_set,
-                &mut queued_candidates,
-            )
-            .await?;
+            tokio::select! {
+                _ = retry_interval.tick() => {
+                    publish_offer_and_candidates(
+                        &client,
+                        &sender_pubkey,
+                        &transfer_id,
+                        &offer_sdp,
+                        &candidates,
+                        &keys.signals,
+                    ).await?;
+                }
+                event = next_event(&mut notifications) => {
+                    let event = event?;
+                    handle_sender_signal(
+                        &event,
+                        &mut seen,
+                        &peer,
+                        &keys.signals,
+                        &transfer_id,
+                        receiver_pubkey,
+                        &mut answer_set,
+                        &mut queued_candidates,
+                    )
+                    .await?;
+                }
+            }
         }
         Ok::<(), anyhow::Error>(())
     })
@@ -268,6 +273,45 @@ async fn publish_signal(
     client.publish(&event).await
 }
 
+async fn publish_offer_and_candidates(
+    client: &NostrClient,
+    sender_pubkey: &PublicKey,
+    transfer_id: &str,
+    offer_sdp: &str,
+    candidates: &[String],
+    key: &[u8; aes::AES_KEY_LEN],
+) -> Result<()> {
+    publish_signal(
+        client,
+        sender_pubkey,
+        transfer_id,
+        Signal::Offer {
+            sdp: offer_sdp.to_string(),
+        },
+        key,
+    )
+    .await?;
+
+    for candidate in candidates {
+        publish_signal(
+            client,
+            sender_pubkey,
+            transfer_id,
+            Signal::Candidate {
+                candidate: Some(CandidatePayload {
+                    candidate: candidate.clone(),
+                    sdp_mid: Some("0".to_string()),
+                    sdp_m_line_index: Some(0),
+                }),
+            },
+            key,
+        )
+        .await?;
+    }
+
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn handle_sender_signal(
     event: &Event,
@@ -295,15 +339,14 @@ async fn handle_sender_signal(
             peer.set_remote_description(answer).await?;
             *answer_set = true;
             for candidate in queued_candidates.drain(..) {
-                peer.add_ice_candidate(candidate_init(&candidate)).await?;
+                add_ice_candidate_safely(peer, &candidate).await;
             }
         }
         Signal::Candidate {
             candidate: Some(candidate),
         } => {
             if *answer_set {
-                peer.add_ice_candidate(candidate_init(&candidate.candidate))
-                    .await?;
+                add_ice_candidate_safely(peer, &candidate.candidate).await;
             } else {
                 queued_candidates.push(candidate.candidate);
             }

@@ -17,17 +17,18 @@ use crate::crypto::pin::{
 use crate::signaling::nostr::{
     CandidatePayload, NostrClient, PinExchangeEvent, PinExchangePayload, Signal,
     create_authenticated_ack_event, create_signal_event, parse_pin_exchange_event,
-    parse_signal_event, pin_exchange_filter, signal_filter_from_author,
+    parse_signal_event, pin_exchange_filter, signal_filter_from_sender,
 };
 use crate::transfer::run_receiver;
 use crate::ui;
 use crate::util::{format_bytes, resolve_destination};
 use crate::webrtc::common::{DcMessenger, WebRtcPeer, open_and_detach};
-use crate::webrtc::{advertise_max_message_size, candidate_init, candidate_strings};
+use crate::webrtc::{add_ice_candidate_safely, advertise_max_message_size, candidate_strings};
 
 const CONNECTION_TIMEOUT: Duration = Duration::from_secs(30);
 const WAIT_FOR_SIGNAL_TIMEOUT: Duration = Duration::from_secs(60 * 60);
 const ICE_GATHER_TIMEOUT: Duration = Duration::from_secs(5);
+const ANSWER_RETRY_INTERVAL: Duration = Duration::from_secs(5);
 
 pub async fn receive_file_nostr(pin: &str, output_dir: Option<PathBuf>) -> Result<()> {
     let pin = pin.trim();
@@ -80,8 +81,7 @@ pub async fn receive_file_nostr(pin: &str, output_dir: Option<PathBuf>) -> Resul
 
     ui::status("Waiting for sender P2P offer...");
     let sender_pubkey = exchange.sender_pubkey;
-    let signal_filter =
-        signal_filter_from_author(&exchange.transfer_id, &sender_pubkey, sender_pubkey);
+    let signal_filter = signal_filter_from_sender(&exchange.transfer_id, sender_pubkey);
     let mut notifications = client.notifications();
     let sub_id = client.subscribe(signal_filter.clone()).await?;
     let mut seen = HashSet::new();
@@ -132,7 +132,7 @@ pub async fn receive_file_nostr(pin: &str, output_dir: Option<PathBuf>) -> Resul
     let offer = RTCSessionDescription::offer(offer_sdp).context("Invalid offer SDP")?;
     peer.set_remote_description(offer).await?;
     for candidate in queued_candidates.drain(..) {
-        peer.add_ice_candidate(candidate_init(&candidate)).await?;
+        add_ice_candidate_safely(&peer, &candidate).await;
     }
 
     let answer = peer.create_answer().await?;
@@ -140,39 +140,39 @@ pub async fn receive_file_nostr(pin: &str, output_dir: Option<PathBuf>) -> Resul
 
     ui::status("Gathering network candidates...");
     let candidates = peer.gather_ice_candidates(ICE_GATHER_TIMEOUT).await?;
+    let answer_sdp = advertise_max_message_size(answer.sdp);
+    let candidates = candidate_strings(candidates)?;
 
-    publish_signal(
+    ui::status("Publishing P2P answer...");
+    publish_answer_and_candidates(
         &client,
         &sender_pubkey,
         &exchange.transfer_id,
-        Signal::Answer {
-            sdp: advertise_max_message_size(answer.sdp),
-        },
+        &answer_sdp,
+        &candidates,
         &exchange.keys.signals,
     )
     .await?;
-    for candidate in candidate_strings(candidates)? {
-        publish_signal(
-            &client,
-            &sender_pubkey,
-            &exchange.transfer_id,
-            Signal::Candidate {
-                candidate: Some(CandidatePayload {
-                    candidate,
-                    sdp_mid: Some("0".to_string()),
-                    sdp_m_line_index: Some(0),
-                }),
-            },
-            &exchange.keys.signals,
-        )
-        .await?;
-    }
 
     let peer = Arc::new(peer);
+    let mut answer_retry = tokio::time::interval(ANSWER_RETRY_INTERVAL);
+    answer_retry.tick().await;
 
     ui::status("Waiting for data channel...");
+    let data_channel_timeout = tokio::time::sleep(CONNECTION_TIMEOUT);
+    tokio::pin!(data_channel_timeout);
     let data_channel = loop {
         tokio::select! {
+            _ = answer_retry.tick() => {
+                publish_answer_and_candidates(
+                    &client,
+                    &sender_pubkey,
+                    &exchange.transfer_id,
+                    &answer_sdp,
+                    &candidates,
+                    &exchange.keys.signals,
+                ).await?;
+            }
             maybe_channel = data_channel_rx.recv() => {
                 break maybe_channel.context("Sender never opened a data channel")?;
             }
@@ -187,7 +187,7 @@ pub async fn receive_file_nostr(pin: &str, output_dir: Option<PathBuf>) -> Resul
                     sender_pubkey,
                 ).await?;
             }
-            _ = tokio::time::sleep(CONNECTION_TIMEOUT) => {
+            _ = &mut data_channel_timeout => {
                 bail!("Timed out waiting for data channel");
             }
         }
@@ -198,6 +198,16 @@ pub async fn receive_file_nostr(pin: &str, output_dir: Option<PathBuf>) -> Resul
     let raw = loop {
         tokio::select! {
             result = &mut open => break result?,
+            _ = answer_retry.tick() => {
+                publish_answer_and_candidates(
+                    &client,
+                    &sender_pubkey,
+                    &exchange.transfer_id,
+                    &answer_sdp,
+                    &candidates,
+                    &exchange.keys.signals,
+                ).await?;
+            }
             event = next_event(&mut notifications) => {
                 let event = event?;
                 handle_receiver_candidate(
@@ -288,6 +298,45 @@ async fn publish_signal(
     client.publish(&event).await
 }
 
+async fn publish_answer_and_candidates(
+    client: &NostrClient,
+    sender_pubkey: &PublicKey,
+    transfer_id: &str,
+    answer_sdp: &str,
+    candidates: &[String],
+    key: &[u8; aes::AES_KEY_LEN],
+) -> Result<()> {
+    publish_signal(
+        client,
+        sender_pubkey,
+        transfer_id,
+        Signal::Answer {
+            sdp: answer_sdp.to_string(),
+        },
+        key,
+    )
+    .await?;
+
+    for candidate in candidates {
+        publish_signal(
+            client,
+            sender_pubkey,
+            transfer_id,
+            Signal::Candidate {
+                candidate: Some(CandidatePayload {
+                    candidate: candidate.clone(),
+                    sdp_mid: Some("0".to_string()),
+                    sdp_m_line_index: Some(0),
+                }),
+            },
+            key,
+        )
+        .await?;
+    }
+
+    Ok(())
+}
+
 fn handle_pre_offer_signal(
     event: &Event,
     seen: &mut HashSet<EventId>,
@@ -341,8 +390,7 @@ async fn handle_receiver_candidate(
         candidate: Some(candidate),
     } = parsed.signal
     {
-        peer.add_ice_candidate(candidate_init(&candidate.candidate))
-            .await?;
+        add_ice_candidate_safely(peer, &candidate.candidate).await;
     }
     Ok(())
 }

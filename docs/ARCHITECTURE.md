@@ -22,6 +22,13 @@ This is the default mode.
    with the signals key.
 6. Sender and receiver exchange encrypted kind `24242` WebRTC signal events:
    `offer`, `answer`, and `candidate`.
+   - Signal events use tags `t`, `p=<sender pubkey>`, and `type=signal`.
+   - Sender-side answer subscriptions filter by `t`, `p=<sender pubkey>`, and
+     receiver author.
+   - Receiver-side offer subscriptions filter by `t` and sender author only,
+     matching `secure-send-web`.
+   - Offer and answer bundles are republished while the P2P connection is
+     pending so relay misses do not strand the session.
 7. File bytes transfer directly over the WebRTC data channel using the P2P
    content key.
 

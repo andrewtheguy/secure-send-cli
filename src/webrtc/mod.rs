@@ -14,6 +14,8 @@ pub use nostr_sender::send_file_nostr;
 use anyhow::Result;
 use webrtc::ice_transport::ice_candidate::{RTCIceCandidate, RTCIceCandidateInit};
 
+use crate::webrtc::common::WebRtcPeer;
+
 /// Serialize gathered ICE candidates to their SDP `candidate:` strings - the
 /// only field secure-send-web transmits and reads.
 pub(crate) fn candidate_strings(candidates: Vec<RTCIceCandidate>) -> Result<Vec<String>> {
@@ -32,6 +34,14 @@ pub(crate) fn candidate_init(candidate: &str) -> RTCIceCandidateInit {
         sdp_mid: Some("0".to_string()),
         sdp_mline_index: Some(0),
         username_fragment: None,
+    }
+}
+
+/// Match secure-send-web's candidate handling: malformed, duplicate, or stale
+/// candidates should not abort an otherwise viable WebRTC connection attempt.
+pub(crate) async fn add_ice_candidate_safely(peer: &WebRtcPeer, candidate: &str) {
+    if let Err(err) = peer.add_ice_candidate(candidate_init(candidate)).await {
+        log::warn!("Ignoring ICE candidate error: {err:#}");
     }
 }
 
