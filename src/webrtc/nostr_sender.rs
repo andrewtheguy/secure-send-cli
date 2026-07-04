@@ -3,7 +3,7 @@
 use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use nostr_sdk::prelude::*;
@@ -61,16 +61,33 @@ pub async fn send_file_nostr(path: &Path) -> Result<()> {
     let mime_type = "application/octet-stream".to_string();
 
     let session_start = now_ms();
+    let step = Instant::now();
+    ui::status("Generating secure PIN material...");
     let pin = generate_pin()?;
     let hint = compute_pin_hint(&pin, 0);
     let salt = generate_salt()?;
     let transfer_id = generate_transfer_id()?;
-    let keys = derive_nostr_transfer_keys(&pin, &salt)?;
+    ui::status_timed("Generated secure PIN material", step.elapsed());
 
+    let step = Instant::now();
+    ui::status("Deriving PIN session keys...");
+    let keys = derive_nostr_transfer_keys(&pin, &salt)?;
+    ui::status_timed("Derived PIN session keys", step.elapsed());
+
+    let step = Instant::now();
     ui::status("Connecting to Nostr relays...");
     let client = NostrClient::connect(Keys::generate()).await?;
     let sender_pubkey = client.public_key();
+    ui::status_timed(
+        &format!(
+            "Connected to Nostr relays ({})",
+            nostr::DEFAULT_RELAYS.len()
+        ),
+        step.elapsed(),
+    );
 
+    let step = Instant::now();
+    ui::status("Encrypting transfer metadata...");
     let payload = PinExchangePayload {
         content_type: "file".to_string(),
         transfer_id: transfer_id.clone(),
@@ -83,8 +100,12 @@ pub async fn send_file_nostr(path: &Path) -> Result<()> {
     let encrypted_payload = aes::encrypt(&keys.metadata, &serde_json::to_vec(&payload)?)?;
     let exchange_event =
         create_pin_exchange_event(&client, &encrypted_payload, &salt, &transfer_id, &hint)?;
+    ui::status_timed("Encrypted transfer metadata", step.elapsed());
 
+    let step = Instant::now();
+    ui::status("Publishing PIN exchange to Nostr...");
     client.publish(&exchange_event).await?;
+    ui::status_timed("Published PIN exchange to Nostr", step.elapsed());
 
     ui::status(&format!(
         "Ready to send \"{}\" ({}). Enter this PIN in secure-send-web:",
@@ -96,6 +117,7 @@ pub async fn send_file_nostr(path: &Path) -> Result<()> {
     ui::status("Waiting for receiver...");
     let receiver_pubkey =
         wait_for_receiver_ack(&client, &transfer_id, &sender_pubkey, &keys.signals).await?;
+    ui::status("Receiver ready ACK received.");
 
     if is_expired(session_start) {
         bail!("Session expired. Please start a new transfer.");
@@ -117,7 +139,8 @@ pub async fn send_file_nostr(path: &Path) -> Result<()> {
     let mut notifications = client.notifications();
     let sub_id = client.subscribe(signal_filter.clone()).await?;
 
-    ui::status("Publishing P2P offer...");
+    let step = Instant::now();
+    ui::status("Publishing P2P offer to Nostr...");
     publish_offer_and_candidates(
         &client,
         &sender_pubkey,
@@ -127,6 +150,7 @@ pub async fn send_file_nostr(path: &Path) -> Result<()> {
         &keys.signals,
     )
     .await?;
+    ui::status_timed("Published P2P offer to Nostr", step.elapsed());
 
     let peer = Arc::new(peer);
     let mut seen = HashSet::new();
@@ -155,6 +179,8 @@ pub async fn send_file_nostr(path: &Path) -> Result<()> {
         while !answer_set {
             tokio::select! {
                 _ = retry_interval.tick() => {
+                    let step = Instant::now();
+                    ui::status("Republishing P2P offer to Nostr...");
                     publish_offer_and_candidates(
                         &client,
                         &sender_pubkey,
@@ -163,6 +189,7 @@ pub async fn send_file_nostr(path: &Path) -> Result<()> {
                         &candidates,
                         &keys.signals,
                     ).await?;
+                    ui::status_timed("Republished P2P offer to Nostr", step.elapsed());
                 }
                 event = next_event(&mut notifications) => {
                     let event = event?;
@@ -233,10 +260,21 @@ async fn wait_for_receiver_ack(
 ) -> Result<PublicKey> {
     let filter = ack_filter(transfer_id, sender_pubkey);
     let mut notifications = client.notifications();
+    let step = Instant::now();
+    ui::status("Subscribing for receiver ready ACK...");
     let sub_id = client.subscribe(filter.clone()).await?;
+    ui::status_timed("Subscribed for receiver ready ACK", step.elapsed());
     let mut seen = HashSet::new();
 
-    for event in client.fetch(filter).await? {
+    let step = Instant::now();
+    ui::status("Checking existing receiver ready ACK events...");
+    let events = client.fetch(filter).await?;
+    ui::status_timed(
+        &format!("Fetched {} existing ACK event(s)", events.len()),
+        step.elapsed(),
+    );
+
+    for event in events {
         seen.insert(event.id);
         if let Some(ack) = parse_ack_event(&event, key, transfer_id, 0) {
             client.unsubscribe(&sub_id).await;
@@ -244,6 +282,7 @@ async fn wait_for_receiver_ack(
         }
     }
 
+    ui::status("Listening for receiver ready ACK...");
     let receiver = tokio::time::timeout(WAIT_FOR_RECEIVER_TIMEOUT, async {
         loop {
             let event = next_event(&mut notifications).await?;

@@ -5,6 +5,7 @@
 
 use std::io::Write;
 use std::path::Path;
+use std::time::Duration;
 
 use anyhow::{Result, anyhow};
 
@@ -28,6 +29,20 @@ pub enum FileExistsChoice {
 /// Informational status line (stderr).
 pub fn status(line: &str) {
     eprintln!("{line}");
+}
+
+/// Informational status line with elapsed time.
+pub fn status_timed(line: &str, elapsed: Duration) {
+    eprintln!("{line} ({})", format_elapsed(elapsed));
+}
+
+fn format_elapsed(elapsed: Duration) -> String {
+    let ms = elapsed.as_millis();
+    if ms < 1000 {
+        format!("{ms} ms")
+    } else {
+        format!("{:.1} s", elapsed.as_secs_f64())
+    }
 }
 
 /// A base64 signaling code the user must copy (stdout, framed for readability).

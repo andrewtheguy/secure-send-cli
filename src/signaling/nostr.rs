@@ -132,6 +132,12 @@ impl NostrClient {
     pub async fn publish(&self, event: &Event) -> Result<()> {
         let mut last_failure = String::from("no relay accepted the event");
         for attempt in 0..PUBLISH_RETRIES {
+            log::debug!(
+                "Publishing Nostr event kind {:?}, attempt {}/{}",
+                event.kind,
+                attempt + 1,
+                PUBLISH_RETRIES
+            );
             let output = self
                 .client
                 .send_event(event)
@@ -139,6 +145,11 @@ impl NostrClient {
                 .context("Failed to publish Nostr event")?;
 
             if !output.success.is_empty() {
+                log::debug!(
+                    "Nostr publish accepted by {} relay(s), failed on {} relay(s)",
+                    output.success.len(),
+                    output.failed.len()
+                );
                 return Ok(());
             }
 
@@ -152,6 +163,12 @@ impl NostrClient {
                     .collect::<Vec<_>>()
                     .join("; ")
             };
+            log::warn!(
+                "Nostr publish attempt {}/{} was not accepted by any relay: {}",
+                attempt + 1,
+                PUBLISH_RETRIES,
+                last_failure
+            );
 
             if attempt + 1 < PUBLISH_RETRIES {
                 tokio::time::sleep(Duration::from_millis(500 * (1_u64 << attempt))).await;

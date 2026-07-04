@@ -3,7 +3,7 @@
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use nostr_sdk::prelude::*;
@@ -36,8 +36,10 @@ pub async fn receive_file_nostr(pin: &str, output_dir: Option<PathBuf>) -> Resul
         bail!("Invalid PIN");
     }
 
+    let step = Instant::now();
     ui::status("Connecting to Nostr relays...");
     let client = NostrClient::connect(Keys::generate()).await?;
+    ui::status_timed("Connected to Nostr relays", step.elapsed());
 
     ui::status("Searching for sender...");
     let exchange = find_exchange_event(&client, pin).await?;
@@ -77,7 +79,10 @@ pub async fn receive_file_nostr(pin: &str, output_dir: Option<PathBuf>) -> Resul
         &exchange.keys.signals,
         Some(&exchange.matched_hint),
     )?;
+    let step = Instant::now();
+    ui::status("Publishing receiver ready ACK to Nostr...");
     client.publish(&ack).await?;
+    ui::status_timed("Published receiver ready ACK to Nostr", step.elapsed());
 
     ui::status("Waiting for sender P2P offer...");
     let sender_pubkey = exchange.sender_pubkey;
@@ -143,7 +148,8 @@ pub async fn receive_file_nostr(pin: &str, output_dir: Option<PathBuf>) -> Resul
     let answer_sdp = advertise_max_message_size(answer.sdp);
     let candidates = candidate_strings(candidates)?;
 
-    ui::status("Publishing P2P answer...");
+    let step = Instant::now();
+    ui::status("Publishing P2P answer to Nostr...");
     publish_answer_and_candidates(
         &client,
         &sender_pubkey,
@@ -153,6 +159,7 @@ pub async fn receive_file_nostr(pin: &str, output_dir: Option<PathBuf>) -> Resul
         &exchange.keys.signals,
     )
     .await?;
+    ui::status_timed("Published P2P answer to Nostr", step.elapsed());
 
     let peer = Arc::new(peer);
     let mut answer_retry = tokio::time::interval(ANSWER_RETRY_INTERVAL);
@@ -164,6 +171,8 @@ pub async fn receive_file_nostr(pin: &str, output_dir: Option<PathBuf>) -> Resul
     let data_channel = loop {
         tokio::select! {
             _ = answer_retry.tick() => {
+                let step = Instant::now();
+                ui::status("Republishing P2P answer to Nostr...");
                 publish_answer_and_candidates(
                     &client,
                     &sender_pubkey,
@@ -172,6 +181,7 @@ pub async fn receive_file_nostr(pin: &str, output_dir: Option<PathBuf>) -> Resul
                     &candidates,
                     &exchange.keys.signals,
                 ).await?;
+                ui::status_timed("Republished P2P answer to Nostr", step.elapsed());
             }
             maybe_channel = data_channel_rx.recv() => {
                 break maybe_channel.context("Sender never opened a data channel")?;
@@ -199,6 +209,8 @@ pub async fn receive_file_nostr(pin: &str, output_dir: Option<PathBuf>) -> Resul
         tokio::select! {
             result = &mut open => break result?,
             _ = answer_retry.tick() => {
+                let step = Instant::now();
+                ui::status("Republishing P2P answer to Nostr...");
                 publish_answer_and_candidates(
                     &client,
                     &sender_pubkey,
@@ -207,6 +219,7 @@ pub async fn receive_file_nostr(pin: &str, output_dir: Option<PathBuf>) -> Resul
                     &candidates,
                     &exchange.keys.signals,
                 ).await?;
+                ui::status_timed("Republished P2P answer to Nostr", step.elapsed());
             }
             event = next_event(&mut notifications) => {
                 let event = event?;
@@ -239,11 +252,26 @@ pub async fn receive_file_nostr(pin: &str, output_dir: Option<PathBuf>) -> Resul
 }
 
 async fn find_exchange_event(client: &NostrClient, pin: &str) -> Result<PinExchangeEvent> {
+    let step = Instant::now();
+    ui::status("Deriving PIN lookup hints...");
     let hints = vec![compute_pin_hint(pin, 0), compute_pin_hint(pin, 1)];
+    ui::status_timed("Derived PIN lookup hints", step.elapsed());
+
+    let step = Instant::now();
+    ui::status("Fetching PIN exchange events from Nostr...");
     let mut events = client.fetch(pin_exchange_filter(&hints)).await?;
+    ui::status_timed(
+        &format!("Fetched {} candidate PIN exchange event(s)", events.len()),
+        step.elapsed(),
+    );
     events.sort_by_key(|event| std::cmp::Reverse(event.created_at.as_secs()));
 
+    if !events.is_empty() {
+        ui::status("Decrypting candidate transfer metadata...");
+    }
+    let decrypt_start = Instant::now();
     let mut saw_expired = false;
+    let mut candidates_checked = 0usize;
     for event in events {
         let created_at_ms = event.created_at.as_secs() * 1000;
         if now_ms().saturating_sub(created_at_ms) > TRANSFER_EXPIRATION_MS {
@@ -256,6 +284,7 @@ async fn find_exchange_event(client: &NostrClient, pin: &str) -> Result<PinExcha
         else {
             continue;
         };
+        candidates_checked += 1;
 
         let Ok(keys) = derive_nostr_transfer_keys(pin, &salt) else {
             continue;
@@ -270,6 +299,10 @@ async fn find_exchange_event(client: &NostrClient, pin: &str) -> Result<PinExcha
             continue;
         }
 
+        ui::status_timed(
+            &format!("Matched sender after {candidates_checked} candidate event(s)"),
+            decrypt_start.elapsed(),
+        );
         return Ok(PinExchangeEvent {
             payload,
             salt,
