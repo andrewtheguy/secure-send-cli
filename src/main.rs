@@ -76,7 +76,10 @@ fn main() {
 async fn async_main() -> Result<()> {
     let cli = Cli::parse();
 
-    let log_level = if cli.verbose { "debug" } else { "info" };
+    // Without --verbose, keep the transfer output clean: suppress info/debug/trace
+    // log noise from this crate and its dependencies, leaving only warnings and
+    // errors. --verbose opts into full debug logging. RUST_LOG still overrides both.
+    let log_level = if cli.verbose { "debug" } else { "warn" };
     let filter = format!("{log_level},webrtc_ice=error");
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(&filter)).init();
 

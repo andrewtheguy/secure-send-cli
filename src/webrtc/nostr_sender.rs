@@ -13,8 +13,8 @@ use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 use crate::crypto::aes;
 use crate::crypto::chunk::MAX_MESSAGE_SIZE;
 use crate::crypto::pin::{
-    compute_pin_hint, derive_nostr_transfer_keys, generate_pin, generate_salt,
-    generate_transfer_id, is_expired, now_ms,
+    compute_pin_fingerprint, compute_pin_hint, derive_nostr_transfer_keys, format_pin_fingerprint,
+    generate_pin, generate_salt, generate_transfer_id, is_expired, now_ms,
 };
 use crate::signaling::nostr::{
     self, CandidatePayload, NostrClient, PinExchangePayload, Signal, ack_filter,
@@ -113,6 +113,10 @@ pub async fn send_file_nostr(path: &Path) -> Result<()> {
         format_bytes(file_size)
     ));
     println!("{pin}");
+    ui::status(&format!(
+        "PIN fingerprint: {} (should match the receiver's)",
+        format_pin_fingerprint(&compute_pin_fingerprint(&pin))
+    ));
 
     ui::status("Waiting for receiver...");
     let receiver_pubkey =

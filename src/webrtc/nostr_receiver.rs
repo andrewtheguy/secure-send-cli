@@ -12,7 +12,8 @@ use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 use crate::crypto::aes;
 use crate::crypto::chunk::MAX_MESSAGE_SIZE;
 use crate::crypto::pin::{
-    TRANSFER_EXPIRATION_MS, compute_pin_hint, derive_nostr_transfer_keys, is_valid_pin, now_ms,
+    TRANSFER_EXPIRATION_MS, compute_pin_fingerprint, compute_pin_hint, derive_nostr_transfer_keys,
+    format_pin_fingerprint, is_valid_pin, now_ms,
 };
 use crate::signaling::nostr::{
     CandidatePayload, NostrClient, PinExchangeEvent, PinExchangePayload, Signal,
@@ -34,6 +35,11 @@ pub async fn receive_file_nostr(pin: &str, output_dir: Option<PathBuf>) -> Resul
     if !is_valid_pin(pin) {
         bail!("Invalid PIN");
     }
+
+    ui::status(&format!(
+        "PIN fingerprint: {} (should match the sender's)",
+        format_pin_fingerprint(&compute_pin_fingerprint(pin))
+    ));
 
     let step = Instant::now();
     ui::status("Connecting to Nostr relays...");
