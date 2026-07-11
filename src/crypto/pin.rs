@@ -21,6 +21,15 @@ const PIN_HINT_BUCKET_SEC: u64 = 3600;
 const PIN_HINT_SALT: &str = "secure-send:pin-hint:v1";
 const PIN_KEY_LABEL_CONTEXT: &str = "secure-send:pin-key:v1";
 
+// Local-only PIN fingerprint. Displayed to both sides so two humans can visually
+// confirm on-device that they entered the same PIN. It never crosses the network,
+// so it uses a lighter work factor than the wire hint and a distinct, time-independent
+// salt so both sides always derive the same value. Mirrors secure-send-web's
+// computePinFingerprint (see src/lib/crypto/pin.ts).
+const PIN_FINGERPRINT_LENGTH: usize = 8; // hex characters
+const PIN_FINGERPRINT_SALT: &str = "secure-send:pin-fingerprint:v1";
+const PIN_FINGERPRINT_ITERATIONS: u32 = 200_000;
+
 pub const TRANSFER_EXPIRATION_MS: u64 = 60 * 60 * 1000;
 
 #[derive(Debug, Clone)]
@@ -133,6 +142,32 @@ pub fn compute_pin_hint(pin: &str, bucket_offset: u64) -> String {
     hex_lower(&out)[..PIN_HINT_LENGTH].to_string()
 }
 
+/// Compute the local-only PIN fingerprint: a stable, time-independent one-way
+/// derivation of the PIN so two humans can visually confirm they used the same PIN.
+/// Mirrors secure-send-web's `computePinFingerprint`.
+pub fn compute_pin_fingerprint(pin: &str) -> String {
+    let mut out = vec![0u8; PIN_FINGERPRINT_LENGTH.div_ceil(2)];
+    pbkdf2_hmac::<Sha256>(
+        pin.as_bytes(),
+        PIN_FINGERPRINT_SALT.as_bytes(),
+        PIN_FINGERPRINT_ITERATIONS,
+        &mut out,
+    );
+    hex_lower(&out)[..PIN_FINGERPRINT_LENGTH].to_string()
+}
+
+/// Format a PIN fingerprint for display: uppercased and grouped into 4-char blocks
+/// (e.g. `ABCD-EF01`). Mirrors secure-send-web's `formatPinHint`.
+pub fn format_pin_fingerprint(fingerprint: &str) -> String {
+    let upper = fingerprint.to_uppercase();
+    upper
+        .as_bytes()
+        .chunks(4)
+        .map(|chunk| std::str::from_utf8(chunk).unwrap_or_default())
+        .collect::<Vec<_>>()
+        .join("-")
+}
+
 pub fn derive_nostr_transfer_keys(pin: &str, salt: &[u8]) -> Result<NostrTransferKeys> {
     Ok(NostrTransferKeys {
         metadata: derive_labeled_key(pin, salt, PinKeyLabel::Metadata)?,
@@ -195,6 +230,22 @@ mod tests {
         let mut pin = generate_pin().unwrap().into_bytes();
         pin[0] = if pin[0] == b'A' { b'B' } else { b'A' };
         assert!(!is_valid_pin(std::str::from_utf8(&pin).unwrap()));
+    }
+
+    #[test]
+    fn fingerprint_is_stable_and_formatted() {
+        let pin = "ABCDEFGHJKL2";
+        let fp = compute_pin_fingerprint(pin);
+        // 8 hex chars, deterministic (no time bucket).
+        assert_eq!(fp.len(), PIN_FINGERPRINT_LENGTH);
+        assert_eq!(fp, compute_pin_fingerprint(pin));
+        assert!(fp.chars().all(|c| c.is_ascii_hexdigit()));
+
+        // Parity with secure-send-web's computePinFingerprint (verified against
+        // PBKDF2-SHA256 in both Python and the browser Web Crypto API).
+        assert_eq!(fp, "5a98fa8a");
+        assert_eq!(format_pin_fingerprint(&fp), "5A98-FA8A");
+        assert_ne!(compute_pin_fingerprint(pin), compute_pin_fingerprint("MNPQRSTUVWX3"));
     }
 
     #[test]
