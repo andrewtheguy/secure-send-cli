@@ -70,6 +70,11 @@ pub async fn run(terminal: &mut DefaultTerminal, plan: WizardPlan) -> Result<()>
             }
 
             join = &mut task, if state.outcome.is_none() => {
+                // Apply any status updates the task queued before finishing so
+                // the final log reflects them before "press any key to exit".
+                while let Ok(event) = rx.try_recv() {
+                    state.apply(event);
+                }
                 let outcome = match join {
                     Ok(result) => result,
                     Err(e) if e.is_cancelled() => Err(anyhow!("Interrupted")),
