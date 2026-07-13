@@ -188,7 +188,7 @@ impl DirPicker {
         .areas(footer);
 
         if let Some(name) = &self.new_name {
-            widgets::input_line(f, input_row, "New folder name: ", name);
+            widgets::input_line(f, input_row, "New folder name: ", name, name.len());
             if let Some(error) = &self.error {
                 widgets::error_line(f, summary_row, error);
             }

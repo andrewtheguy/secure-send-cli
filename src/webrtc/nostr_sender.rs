@@ -22,7 +22,7 @@ use crate::crypto::chunk::MAX_MESSAGE_SIZE;
 use crate::crypto::ecdh::{EcdhKeyPair, NostrSessionKeys, generate_salt};
 use crate::crypto::pin::{
     PIN_ACTIVE_GENERATIONS, PIN_ROTATION_MS, PIN_WAIT_TIMEOUT_MS, PinRoot, format_pin,
-    generate_pin, generate_transfer_id,
+    generate_pin, generate_transfer_id, pin_fingerprint,
 };
 use crate::signaling::nostr::{
     self, CandidatePayload, ClaimPayload, ConfirmPayload, HandshakeType, NostrClient,
@@ -328,7 +328,7 @@ impl RendezvousContext<'_> {
             self.file_name,
             self.file_size,
             &format_pin(&pin),
-            &root.fingerprint(),
+            &pin_fingerprint(&pin),
         );
 
         Ok(PinGeneration {

@@ -6,11 +6,12 @@
 //! and honors the [`PIN_ACTIVE_GENERATIONS`] most recent ones, so any single
 //! PIN is valid for at most [`PIN_TTL_MS`].
 //!
-//! Every PIN-scoped value is an HKDF derivation off a single PBKDF2-SHA-256
-//! stretch of the PIN (the "PIN root"), domain-separated by info label:
-//! `hint:<bucket>` (rendezvous event lookup tag), `auth` (claim/confirm
-//! sealing key), `rendezvous` (rendezvous payload key), and `fingerprint`
-//! (local-only visual check). The PIN derives no content-encryption keys —
+//! Every wire-exposed PIN-scoped value is an HKDF derivation off a single
+//! PBKDF2-SHA-256 stretch of the PIN (the "PIN root"), domain-separated by
+//! info label: `hint:<bucket>` (rendezvous event lookup tag), `auth`
+//! (claim/confirm sealing key), and `rendezvous` (rendezvous payload key).
+//! The on-screen [`pin_fingerprint`] is never transmitted, so it uses its own
+//! deliberately light stretch. The PIN derives no content-encryption keys —
 //! those come from the ephemeral ECDH exchange the PIN authenticates (see
 //! [`crate::crypto::ecdh`]). Mirrors secure-send-web's `src/lib/crypto/pin.ts`.
 
@@ -64,6 +65,12 @@ const PIN_HKDF_SALT: &str = "secure-send:pin:v2";
 const PIN_HINT_LENGTH: usize = 16;
 /// PIN fingerprint length in lowercase hex characters (48 bits, local-only).
 const PIN_FINGERPRINT_LENGTH: usize = 12;
+/// The fingerprint is never transmitted — it exists only for on-screen human
+/// comparison — so it uses a deliberately light stretch instead of the full
+/// PIN-root work factor.
+const PIN_FINGERPRINT_ITERATIONS: u32 = 1_000;
+/// Domain-separation salt for the fingerprint derivation (public).
+const PIN_FINGERPRINT_SALT: &str = "secure-send:pin-fingerprint:v2";
 
 pub fn now_ms() -> u64 {
     SystemTime::now()
@@ -245,16 +252,24 @@ impl PinRoot {
         self.aes_key("rendezvous")
     }
 
-    /// The PIN fingerprint: a stable one-way derivation displayed to both
-    /// sides so two humans can visually confirm they entered the same PIN.
-    /// Never published to relays, so it carries no rotation-bucket scoping.
-    ///
-    /// Encoded as 12 lowercase hex chars, displayed as-is (no grouping).
-    pub fn fingerprint(&self) -> String {
-        let mut bytes = vec![0u8; PIN_FINGERPRINT_LENGTH.div_ceil(2)];
-        self.expand("fingerprint", &mut bytes);
-        hex_lower(&bytes)[..PIN_FINGERPRINT_LENGTH].to_string()
-    }
+}
+
+/// The PIN fingerprint: a stable one-way derivation displayed to both sides
+/// so two humans can visually confirm they entered the same PIN. Never
+/// published to relays, so it carries no rotation-bucket scoping and only a
+/// light stretch ([`PIN_FINGERPRINT_ITERATIONS`]) — cheap enough to show the
+/// moment the PIN is typed.
+///
+/// Encoded as 12 lowercase hex chars, displayed as-is (no grouping).
+pub fn pin_fingerprint(pin: &str) -> String {
+    let mut bytes = [0u8; PIN_FINGERPRINT_LENGTH.div_ceil(2)];
+    pbkdf2_hmac::<Sha256>(
+        pin.as_bytes(),
+        PIN_FINGERPRINT_SALT.as_bytes(),
+        PIN_FINGERPRINT_ITERATIONS,
+        &mut bytes,
+    );
+    hex_lower(&bytes)[..PIN_FINGERPRINT_LENGTH].to_string()
 }
 
 /// The current PIN rotation bucket (`floor(now_ms / PIN_ROTATION_MS)`).
@@ -335,6 +350,14 @@ mod tests {
             hex_lower(&root.rendezvous_key()),
             "7f9f1f01b4db42c33120fc470ecc77100ce6015bcfa6aac7cc4abd346769d2f9"
         );
-        assert_eq!(root.fingerprint(), "6fb4d8649db3");
+    }
+
+    #[test]
+    fn fingerprint_matches_web_vector() {
+        // Parity with secure-send-web's computePinFingerprint
+        // (PBKDF2-SHA-256, 1k iterations, salt
+        // "secure-send:pin-fingerprint:v2"), verified independently.
+        assert_eq!(pin_fingerprint("ABCDE0123Y"), "e3e017a41404");
+        assert_ne!(pin_fingerprint("ABCDE0123Y"), pin_fingerprint("ABCDE0124Y"));
     }
 }

@@ -11,7 +11,9 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout};
 use ratatui::widgets::Paragraph;
 
-use crate::crypto::pin::{PIN_LENGTH, PinRoot, canonical_pin_char, format_pin, is_valid_pin};
+use crate::crypto::pin::{
+    PIN_LENGTH, canonical_pin_char, format_pin, is_valid_pin, pin_fingerprint,
+};
 
 use super::dir_picker::{DirPicker, DirPickerStep};
 use super::file_browser::{Browser, BrowserStep};
@@ -27,8 +29,8 @@ pub enum WizardPlan {
     /// Stays in the TUI.
     ReceiveNostr {
         pin: String,
-        /// Fingerprint of `pin`, computed during entry so the
-        /// transfer screen doesn't redo the PBKDF2 stretch.
+        /// Fingerprint of `pin`, computed during entry and kept on screen for
+        /// the visual check against the sender's.
         fingerprint: String,
         output: PathBuf,
     },
@@ -60,6 +62,10 @@ enum Screen {
     PinEntry {
         output: PathBuf,
         input: String,
+        /// Insertion point in `input` (0..=len): standard line editing.
+        cursor: usize,
+        /// Fingerprint of a complete, valid `input`, shown for comparison
+        /// with the sender's before the user confirms with Enter.
         fingerprint: Option<String>,
         error: Option<String>,
     },
@@ -124,6 +130,7 @@ fn handle_key(screen: Screen, key: KeyEvent) -> Step {
                     Step::Continue(Screen::PinEntry {
                         output,
                         input: String::new(),
+                        cursor: 0,
                         fingerprint: None,
                         error: None,
                     })
@@ -133,9 +140,10 @@ fn handle_key(screen: Screen, key: KeyEvent) -> Step {
         Screen::PinEntry {
             output,
             input,
+            cursor,
             fingerprint,
             error,
-        } => pin_entry_key(output, input, fingerprint, error, key),
+        } => pin_entry_key(output, input, cursor, fingerprint, error, key),
     }
 }
 
@@ -201,70 +209,91 @@ fn receive_mode_key(selected: usize, key: KeyEvent) -> Step {
 fn pin_entry_key(
     output: PathBuf,
     mut input: String,
+    mut cursor: usize,
     mut fingerprint: Option<String>,
-    error: Option<String>,
+    mut error: Option<String>,
     key: KeyEvent,
 ) -> Step {
+    let mut edited = false;
     match key.code {
         KeyCode::Enter => {
             if is_valid_pin(&input) {
                 let fingerprint = fingerprint.unwrap_or_else(|| pin_fingerprint(&input));
-                Step::Finish(WizardPlan::ReceiveNostr {
+                return Step::Finish(WizardPlan::ReceiveNostr {
                     pin: input,
                     fingerprint,
                     output,
-                })
-            } else {
-                Step::Continue(Screen::PinEntry {
-                    output,
-                    input,
-                    fingerprint,
-                    error: Some("Invalid PIN: check for typos and try again".to_string()),
-                })
+                });
+            }
+            error = Some("Invalid PIN: check for typos and try again".to_string());
+        }
+        KeyCode::Esc => {
+            return Step::Continue(Screen::OutputDir {
+                manual: false,
+                picker: DirPicker::at(output),
+            });
+        }
+        KeyCode::Left => cursor = cursor.saturating_sub(1),
+        KeyCode::Right => cursor = (cursor + 1).min(input.len()),
+        KeyCode::Home => cursor = 0,
+        KeyCode::End => cursor = input.len(),
+        KeyCode::Backspace => {
+            if cursor > 0 {
+                cursor -= 1;
+                input.remove(cursor);
+                edited = true;
             }
         }
-        KeyCode::Esc => Step::Continue(Screen::OutputDir {
-            manual: false,
-            picker: DirPicker::at(output),
-        }),
-        KeyCode::Backspace => {
-            input.pop();
-            Step::Continue(Screen::PinEntry {
-                output,
-                input,
-                fingerprint: None,
-                error: None,
-            })
+        KeyCode::Delete => {
+            if cursor < input.len() {
+                input.remove(cursor);
+                edited = true;
+            }
         }
         // Typed characters are canonicalized like secure-send-web's PIN box:
         // lowercase is uppercased, O -> 0 and I/L -> 1; separators and other
         // characters are ignored.
-        KeyCode::Char(c) if input.len() < PIN_LENGTH && canonical_pin_char(c).is_some() => {
-            input.push(canonical_pin_char(c).expect("guarded above"));
-            if input.len() == PIN_LENGTH && is_valid_pin(&input) {
-                // One-time PBKDF2 stretch (~600k iterations); worth the beat
-                // for the visual check against the sender's fingerprint.
-                fingerprint = Some(pin_fingerprint(&input));
+        KeyCode::Char(c) if input.len() < PIN_LENGTH => {
+            if let Some(c) = canonical_pin_char(c) {
+                input.insert(cursor, c);
+                cursor += 1;
+                edited = true;
             }
-            Step::Continue(Screen::PinEntry {
-                output,
-                input,
-                fingerprint,
-                error: None,
-            })
         }
-        _ => Step::Continue(Screen::PinEntry {
-            output,
-            input,
-            fingerprint,
-            error,
-        }),
+        _ => {}
     }
+
+    if edited {
+        error = None;
+        // Shown for the visual check against the sender's fingerprint before
+        // Enter confirms.
+        fingerprint = (input.len() == PIN_LENGTH && is_valid_pin(&input))
+            .then(|| pin_fingerprint(&input));
+    }
+
+    Step::Continue(Screen::PinEntry {
+        output,
+        input,
+        cursor,
+        fingerprint,
+        error,
+    })
 }
 
-/// Fingerprint of a complete, valid PIN (blocking PBKDF2 stretch).
-fn pin_fingerprint(pin: &str) -> String {
-    PinRoot::derive(pin).fingerprint()
+/// Byte index in the dash-grouped PIN display for a cursor sitting before the
+/// `cursor`-th canonical character: skips over the group dashes `format_pin`
+/// inserts.
+fn display_cursor(display: &str, cursor: usize) -> usize {
+    let mut remaining = cursor;
+    for (i, c) in display.char_indices() {
+        if c != '-' {
+            if remaining == 0 {
+                return i;
+            }
+            remaining -= 1;
+        }
+    }
+    display.len()
 }
 
 fn draw(f: &mut Frame, screen: &mut Screen) {
@@ -335,6 +364,7 @@ fn draw(f: &mut Frame, screen: &mut Screen) {
 
         Screen::PinEntry {
             input,
+            cursor,
             fingerprint,
             error,
             ..
@@ -351,7 +381,8 @@ fn draw(f: &mut Frame, screen: &mut Screen) {
                 Paragraph::new("Enter the sender's 10-character PIN (XXXXX-XXXXX):"),
                 title,
             );
-            widgets::input_line(f, line, "PIN: ", &format_pin(input));
+            let display = format_pin(input);
+            widgets::input_line(f, line, "PIN: ", &display, display_cursor(&display, *cursor));
             if let Some(error) = error {
                 widgets::error_line(f, extra, error);
             } else if let Some(fp) = fingerprint {
@@ -362,7 +393,7 @@ fn draw(f: &mut Frame, screen: &mut Screen) {
                     extra,
                 );
             }
-            widgets::key_hints(f, inner, "Enter confirm · Esc back");
+            widgets::key_hints(f, inner, "Enter confirm · ←/→ move · Esc back");
         }
     }
 }

@@ -46,14 +46,20 @@ pub fn menu(f: &mut Frame, area: Rect, items: &[&str], selected: usize) {
     f.render_widget(List::new(items), area);
 }
 
-/// A single-line text input with a visible cursor at the end.
-pub fn input_line(f: &mut Frame, area: Rect, label: &str, value: &str) {
-    let line = Line::from(vec![
-        label.into(),
-        value.into(),
-        "█".dim(),
-    ]);
-    f.render_widget(Paragraph::new(line), area);
+/// A single-line text input with a visible cursor at byte index `cursor`
+/// (clamped to the end; the value must be single-width characters).
+pub fn input_line(f: &mut Frame, area: Rect, label: &str, value: &str, cursor: usize) {
+    let cursor = cursor.min(value.len());
+    let (before, rest) = value.split_at(cursor);
+    let mut spans = vec![label.to_string().into(), before.to_string().into()];
+    match rest.chars().next() {
+        Some(c) => {
+            spans.push(c.to_string().reversed());
+            spans.push(rest[c.len_utf8()..].to_string().into());
+        }
+        None => spans.push("█".dim()),
+    }
+    f.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
 /// The key-hint footer on the bottom row of `area`.
