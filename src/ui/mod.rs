@@ -58,9 +58,11 @@ static TUI_SINK: OnceLock<mpsc::UnboundedSender<UiEvent>> = OnceLock::new();
 /// Route all subsequent UI output to the TUI as [`UiEvent`]s. Call once,
 /// before spawning the transfer task.
 pub fn install_tui_sink(tx: mpsc::UnboundedSender<UiEvent>) {
-    TUI_SINK
-        .set(tx)
-        .expect("TUI sink installed more than once");
+    // The wizard installs the sink once per process. Guard against a repeat
+    // call anyway: keep the first sender rather than crashing or replacing it.
+    if TUI_SINK.set(tx).is_err() {
+        debug_assert!(false, "TUI sink installed more than once");
+    }
 }
 
 fn sink() -> Option<&'static mpsc::UnboundedSender<UiEvent>> {
