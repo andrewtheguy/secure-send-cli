@@ -7,13 +7,20 @@ protocol support is maintained.
 
 ## What It Does
 
-`secure-send-cli` sends and receives single files with the same wire formats as
-`secure-send-web`:
+`secure-send-cli` sends and receives files and folders with the same wire
+formats as `secure-send-web`. Running the binary with no arguments launches a
+full-screen TUI wizard that walks through the whole transfer: send or receive,
+file/folder selection, signaling mode, output directory, and PIN entry.
 
 - Nostr PIN signaling by default, compatible with the web app's Auto Exchange mode.
-- Manual SS03 copy/paste signaling with `--manual`, compatible with the web app's manual exchange codes.
+- Manual SS03 copy/paste signaling, compatible with the web app's manual
+  exchange codes. When chosen in the wizard, the TUI exits back to the normal
+  terminal so the offer/response codes can be copy/pasted.
+- Multiple files and folders are bundled into a single ZIP before transfer,
+  exactly like the web app (`<folder>.zip` for one folder, `files.zip`
+  otherwise). Received ZIPs are saved as-is; extraction is up to you.
 - WebRTC data-channel transfer using the web app's encrypted chunk protocol.
-- No QR code support in the CLI.
+- No QR code support and no word-based PIN entry in the CLI.
 
 The file bytes flow over the WebRTC data channel. Nostr relays carry only
 encrypted metadata and WebRTC signaling events.
@@ -71,43 +78,44 @@ cargo build --release --all-features
 
 ## Usage
 
-### Nostr PIN Mode
-
-Sender:
-
-```bash
-secure-send-cli send /path/to/file
-```
-
-The sender prints a 12-character PIN. Enter that PIN in `secure-send-web` or in
-another CLI receiver:
+Run the binary with no arguments to start the TUI wizard — it takes no CLI
+arguments at all:
 
 ```bash
-secure-send-cli receive <PIN>
+secure-send-cli
 ```
 
-To choose an output directory:
+The wizard covers everything interactively: choose send or receive, pick files
+and/or folders in the built-in browser (Space to multi-select), choose the
+signaling mode, and enter the output directory and PIN when receiving. Nostr
+PIN transfers run inside the TUI with live status and progress; manual SS03
+transfers drop back to the plain terminal for the code swap.
+
+### Non-Interactive Test Mode
+
+The `test` subcommand exists for testing only. It never prompts: every input
+comes from arguments (manual-mode codes can be piped through stdin).
+
+Nostr PIN mode:
 
 ```bash
-secure-send-cli receive <PIN> --output /path/to/dir
+secure-send-cli test send /path/to/file more-files a-folder
+secure-send-cli test receive <PIN> --output /path/to/dir
 ```
 
-### Manual SS03 Mode
+The sender prints a 12-character PIN on stdout. Multiple paths or a folder are
+sent as one ZIP. If the destination file already exists the receiver fails;
+pass `--overwrite` to replace it.
 
-Sender:
+Manual SS03 mode:
 
 ```bash
-secure-send-cli send --manual /path/to/file
+secure-send-cli test send --manual /path/to/file
+secure-send-cli test receive --manual <OFFER-CODE>
 ```
 
-Receiver:
-
-```bash
-secure-send-cli receive --manual
-```
-
-The sender prints an offer code. The receiver pastes that offer and prints a
-response code. The sender pastes the response, then the WebRTC transfer starts.
+The sender prints an offer code and waits for the response code on stdin. The
+receiver takes the offer code as an argument and prints a response code.
 
 ## Protocol Compatibility
 
@@ -124,10 +132,10 @@ The CLI follows `secure-send-web` as the source of truth:
 
 ## Limits
 
-- Single-file transfers only.
-- Maximum file size is 100 MiB, matching `secure-send-web`.
+- Maximum transfer size is 100 MiB (after ZIP bundling), matching `secure-send-web`.
+- Received ZIPs are not auto-extracted, matching the web app.
 - No resume support.
-- No QR support.
+- No QR support and no word-based PIN entry.
 - No custom relay/discovery mode.
 
 ## Development

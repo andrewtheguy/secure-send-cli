@@ -1,7 +1,6 @@
 //! Nostr Auto Exchange sender compatible with secure-send-web.
 
 use std::collections::HashSet;
-use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -10,6 +9,7 @@ use nostr_sdk::prelude::*;
 use tokio::fs::File;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 
+use crate::archive::SendSource;
 use crate::crypto::aes;
 use crate::crypto::chunk::MAX_MESSAGE_SIZE;
 use crate::crypto::pin::{
@@ -23,7 +23,6 @@ use crate::signaling::nostr::{
 };
 use crate::transfer::run_sender;
 use crate::ui;
-use crate::util::format_bytes;
 use crate::webrtc::common::{DcMessenger, WebRtcPeer, open_and_detach};
 use crate::webrtc::{add_ice_candidate_safely, advertise_max_message_size, candidate_strings};
 
@@ -32,15 +31,11 @@ const CONNECTION_TIMEOUT: Duration = Duration::from_secs(30);
 const ICE_GATHER_TIMEOUT: Duration = Duration::from_secs(5);
 const OFFER_RETRY_INTERVAL: Duration = Duration::from_secs(5);
 
-pub async fn send_file_nostr(path: &Path) -> Result<()> {
-    let metadata = tokio::fs::metadata(path)
-        .await
-        .with_context(|| format!("Cannot read {}", path.display()))?;
-    let file_size = metadata.len();
+pub async fn send_file_nostr(source: &SendSource) -> Result<()> {
+    let file_size = source.file_size;
+    let file_name = source.file_name.clone();
+    let mime_type = source.mime_type.to_string();
 
-    if file_size == 0 {
-        bail!("File is empty: {}", path.display());
-    }
     if file_size > MAX_MESSAGE_SIZE {
         bail!(
             "File is {:.0} MB, which exceeds the {} MB limit",
@@ -48,17 +43,6 @@ pub async fn send_file_nostr(path: &Path) -> Result<()> {
             MAX_MESSAGE_SIZE / 1024 / 1024
         );
     }
-
-    let file_name = path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("file")
-        .trim()
-        .to_string();
-    if file_name.is_empty() {
-        bail!("Missing file name");
-    }
-    let mime_type = "application/octet-stream".to_string();
 
     let session_start = now_ms();
     let step = Instant::now();
@@ -107,16 +91,12 @@ pub async fn send_file_nostr(path: &Path) -> Result<()> {
     client.publish(&exchange_event).await?;
     ui::status_timed("Published PIN exchange to Nostr", step.elapsed());
 
-    ui::status(&format!(
-        "Ready to send \"{}\" ({}). Enter this PIN in secure-send-web:",
-        file_name,
-        format_bytes(file_size)
-    ));
-    println!("{pin}");
-    ui::status(&format!(
-        "PIN fingerprint: {} (should match the receiver's)",
-        format_pin_fingerprint(&compute_pin_fingerprint(&pin))
-    ));
+    ui::show_pin(
+        &file_name,
+        file_size,
+        &pin,
+        &format_pin_fingerprint(&compute_pin_fingerprint(&pin)),
+    );
 
     ui::status("Waiting for receiver...");
     let receiver_pubkey =
@@ -243,9 +223,9 @@ pub async fn send_file_nostr(path: &Path) -> Result<()> {
     ui::status(&format!("Connected via {}", info.connection_type));
 
     let mut messenger = DcMessenger::new(raw);
-    let mut file = File::open(path)
+    let mut file = File::open(&source.path)
         .await
-        .with_context(|| format!("Cannot open {}", path.display()))?;
+        .with_context(|| format!("Cannot open {}", source.path.display()))?;
     let result = run_sender(&mut messenger, &keys.p2p_content, &mut file, file_size).await;
 
     let _ = peer.close().await;

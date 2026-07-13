@@ -56,9 +56,24 @@ pub fn sanitize_filename(name: &str) -> String {
     }
 }
 
-/// Choose the output path for a received file, prompting if it already exists.
-/// Returns `Ok(None)` if the user cancels.
-pub fn resolve_destination(output_dir: Option<PathBuf>, file_name: &str) -> Result<Option<PathBuf>> {
+/// Policy for an already-existing destination file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OnConflict {
+    /// Ask the user (TUI modal, or plain o/r/c prompt in manual fallback).
+    Prompt,
+    /// Error out (non-interactive test mode without --overwrite).
+    Fail,
+    /// Replace the existing file (test mode with --overwrite).
+    Overwrite,
+}
+
+/// Choose the output path for a received file, applying `on_conflict` if it
+/// already exists. Returns `Ok(None)` if the user cancels.
+pub async fn resolve_destination(
+    output_dir: Option<PathBuf>,
+    file_name: &str,
+    on_conflict: OnConflict,
+) -> Result<Option<PathBuf>> {
     let dir = output_dir.unwrap_or_else(|| PathBuf::from("."));
     let safe = sanitize_filename(file_name);
     let path = dir.join(&safe);
@@ -67,7 +82,15 @@ pub fn resolve_destination(output_dir: Option<PathBuf>, file_name: &str) -> Resu
         return Ok(Some(path));
     }
 
-    match prompt_file_exists(&path)? {
+    let choice = match on_conflict {
+        OnConflict::Prompt => prompt_file_exists(&path).await?,
+        OnConflict::Fail => anyhow::bail!(
+            "Destination exists: {} (use --overwrite to replace)",
+            path.display()
+        ),
+        OnConflict::Overwrite => FileExistsChoice::Overwrite,
+    };
+    match choice {
         FileExistsChoice::Overwrite => Ok(Some(path)),
         FileExistsChoice::Rename => Ok(Some(unique_path(&dir, &safe))),
         FileExistsChoice::Cancel => Ok(None),

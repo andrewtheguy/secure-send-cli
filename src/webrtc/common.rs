@@ -145,16 +145,16 @@ impl WebRtcPeer {
             Box::pin(async move {
                 match state {
                     RTCPeerConnectionState::Connected => {
-                        eprintln!("WebRTC connection established!");
+                        crate::ui::status("WebRTC connection established!");
                     }
                     RTCPeerConnectionState::Disconnected => {
-                        eprintln!("WebRTC connection disconnected");
+                        crate::ui::status("WebRTC connection disconnected");
                     }
                     RTCPeerConnectionState::Failed => {
                         log::error!("WebRTC connection failed");
                     }
                     RTCPeerConnectionState::Closed => {
-                        eprintln!("WebRTC connection closed");
+                        crate::ui::status("WebRTC connection closed");
                     }
                     _ => {}
                 }

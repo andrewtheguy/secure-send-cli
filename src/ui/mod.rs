@@ -1,13 +1,21 @@
-//! Plain-text terminal output and interactive prompts for the CLI.
+//! Terminal output and interactive prompts for the CLI.
 //!
-//! Status/progress go to stderr; the base64 signaling codes the user must copy
-//! go to stdout so they can be piped or redirected cleanly.
+//! Every transfer flow reports through the free functions here. By default
+//! they print plain text: status/progress to stderr, and the base64 signaling
+//! codes the user must copy to stdout so they can be piped or redirected
+//! cleanly. When the TUI wizard runs a Nostr transfer it installs an event
+//! sink first ([`install_tui_sink`]); the same functions then emit
+//! [`UiEvent`]s for the TUI to render instead of printing. The sink is
+//! installed at most once per process — the wizard performs a single transfer
+//! and exits.
 
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use anyhow::{Result, anyhow};
+use tokio::sync::{mpsc, oneshot};
 
 use crate::util::{calc_percent, format_bytes};
 
@@ -26,14 +34,57 @@ pub enum FileExistsChoice {
     Cancel,
 }
 
-/// Informational status line (stderr).
-pub fn status(line: &str) {
-    eprintln!("{line}");
+/// What a transfer flow reports while running, for the TUI to render.
+#[derive(Debug)]
+pub enum UiEvent {
+    Status(String),
+    /// Completion of the most recent [`UiEvent::Status`] step ("Doing X..." →
+    /// "Did X (elapsed)"); the TUI replaces that line instead of appending.
+    StatusDone(String),
+    Progress { dir: Direction, bytes: u64, total: u64 },
+    ProgressEnd,
+    ShowPin {
+        file_name: String,
+        size: u64,
+        pin: String,
+        fingerprint: String,
+    },
+    Incoming { file_name: String, size: u64 },
+    FileExists { path: PathBuf, reply: oneshot::Sender<FileExistsChoice> },
 }
 
-/// Informational status line with elapsed time.
+static TUI_SINK: OnceLock<mpsc::UnboundedSender<UiEvent>> = OnceLock::new();
+
+/// Route all subsequent UI output to the TUI as [`UiEvent`]s. Call once,
+/// before spawning the transfer task.
+pub fn install_tui_sink(tx: mpsc::UnboundedSender<UiEvent>) {
+    TUI_SINK
+        .set(tx)
+        .expect("TUI sink installed more than once");
+}
+
+fn sink() -> Option<&'static mpsc::UnboundedSender<UiEvent>> {
+    TUI_SINK.get()
+}
+
+/// Informational status line (stderr).
+pub fn status(line: &str) {
+    if let Some(tx) = sink() {
+        let _ = tx.send(UiEvent::Status(line.to_string()));
+    } else {
+        eprintln!("{line}");
+    }
+}
+
+/// Informational status line with elapsed time, completing the step announced
+/// by the preceding [`status`] call.
 pub fn status_timed(line: &str, elapsed: Duration) {
-    eprintln!("{line} ({})", format_elapsed(elapsed));
+    let full = format!("{line} ({})", format_elapsed(elapsed));
+    if let Some(tx) = sink() {
+        let _ = tx.send(UiEvent::StatusDone(full));
+    } else {
+        eprintln!("{full}");
+    }
 }
 
 fn format_elapsed(elapsed: Duration) -> String {
@@ -55,6 +106,10 @@ pub fn show_code(title: &str, code: &str) {
 
 /// Update the single-line live progress indicator (stderr).
 pub fn progress(dir: Direction, bytes: u64, total: u64) {
+    if let Some(tx) = sink() {
+        let _ = tx.send(UiEvent::Progress { dir, bytes, total });
+        return;
+    }
     let verb = match dir {
         Direction::Send => "Sending",
         Direction::Receive => "Receiving",
@@ -70,11 +125,67 @@ pub fn progress(dir: Direction, bytes: u64, total: u64) {
 
 /// Terminate the live progress line with a newline.
 pub fn progress_end() {
-    eprintln!();
+    if let Some(tx) = sink() {
+        let _ = tx.send(UiEvent::ProgressEnd);
+    } else {
+        eprintln!();
+    }
+}
+
+/// Present the sender's PIN (stdout in plain mode, panel in the TUI) along
+/// with what is being sent and the fingerprint for visual verification.
+pub fn show_pin(file_name: &str, file_size: u64, pin: &str, fingerprint: &str) {
+    if let Some(tx) = sink() {
+        let _ = tx.send(UiEvent::ShowPin {
+            file_name: file_name.to_string(),
+            size: file_size,
+            pin: pin.to_string(),
+            fingerprint: fingerprint.to_string(),
+        });
+        return;
+    }
+    eprintln!(
+        "Ready to send \"{file_name}\" ({}). Enter this PIN in secure-send-web:",
+        format_bytes(file_size)
+    );
+    println!("{pin}");
+    eprintln!("PIN fingerprint: {fingerprint} (should match the receiver's)");
+}
+
+/// Announce the incoming file a receiver is about to accept.
+pub fn incoming(file_name: &str, size: u64, mime_type: Option<&str>) {
+    if let Some(tx) = sink() {
+        let _ = tx.send(UiEvent::Incoming {
+            file_name: file_name.to_string(),
+            size,
+        });
+        return;
+    }
+    match mime_type {
+        Some(mime) => eprintln!(
+            "Incoming file: \"{file_name}\" ({}, {mime})",
+            format_bytes(size)
+        ),
+        None => eprintln!("Incoming file: \"{file_name}\" ({})", format_bytes(size)),
+    }
 }
 
 /// Ask how to handle an existing destination file.
-pub fn prompt_file_exists(path: &Path) -> Result<FileExistsChoice> {
+pub async fn prompt_file_exists(path: &Path) -> Result<FileExistsChoice> {
+    if let Some(tx) = sink() {
+        let (reply, rx) = oneshot::channel();
+        tx.send(UiEvent::FileExists {
+            path: path.to_path_buf(),
+            reply,
+        })
+        .map_err(|_| anyhow!("TUI closed"))?;
+        return rx.await.map_err(|_| anyhow!("TUI closed"));
+    }
+    let path = path.to_path_buf();
+    tokio::task::spawn_blocking(move || prompt_file_exists_blocking(&path)).await?
+}
+
+fn prompt_file_exists_blocking(path: &Path) -> Result<FileExistsChoice> {
     print!(
         "Warning: file exists: {}\n[o]verwrite / [r]ename / [c]ancel: ",
         path.display()
@@ -87,19 +198,6 @@ pub fn prompt_file_exists(path: &Path) -> Result<FileExistsChoice> {
         "o" | "overwrite" => Ok(FileExistsChoice::Overwrite),
         "r" | "rename" => Ok(FileExistsChoice::Rename),
         _ => Ok(FileExistsChoice::Cancel),
-    }
-}
-
-/// Read a line of input from the user with line editing.
-pub fn prompt_line(prompt: &str) -> Result<String> {
-    use rustyline::DefaultEditor;
-
-    let mut rl = DefaultEditor::new().map_err(|e| anyhow!(e.to_string()))?;
-    match rl.readline(prompt) {
-        Ok(line) => Ok(line),
-        Err(rustyline::error::ReadlineError::Interrupted) => Err(anyhow!("Interrupted")),
-        Err(rustyline::error::ReadlineError::Eof) => Err(anyhow!("EOF")),
-        Err(e) => Err(anyhow!(e.to_string())),
     }
 }
 
