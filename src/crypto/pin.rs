@@ -26,7 +26,7 @@ const PIN_KEY_LABEL_CONTEXT: &str = "secure-send:pin-key:v1";
 // so it uses a lighter work factor than the wire hint and a distinct, time-independent
 // salt so both sides always derive the same value. Mirrors secure-send-web's
 // computePinFingerprint (see src/lib/crypto/pin.ts).
-const PIN_FINGERPRINT_LENGTH: usize = 8; // hex characters
+const PIN_FINGERPRINT_LENGTH: usize = 8; // uppercase base32 characters
 const PIN_FINGERPRINT_SALT: &str = "secure-send:pin-fingerprint:v1";
 const PIN_FINGERPRINT_ITERATIONS: u32 = 200_000;
 
@@ -144,16 +144,21 @@ pub fn compute_pin_hint(pin: &str, bucket_offset: u64) -> String {
 
 /// Compute the local-only PIN fingerprint: a stable, time-independent one-way
 /// derivation of the PIN so two humans can visually confirm they used the same PIN.
+///
+/// Encoded as `PIN_FINGERPRINT_LENGTH` uppercase base32 chars (RFC 4648, the Tor v3
+/// `.onion` alphabet A–Z2–7) so the human-compared value avoids ambiguous glyphs.
 /// Mirrors secure-send-web's `computePinFingerprint`.
 pub fn compute_pin_fingerprint(pin: &str) -> String {
-    let mut out = vec![0u8; PIN_FINGERPRINT_LENGTH.div_ceil(2)];
+    // 5 bits per base32 char; div_ceil covers a non-multiple-of-8 bit width.
+    let byte_count = (PIN_FINGERPRINT_LENGTH * 5).div_ceil(8);
+    let mut out = vec![0u8; byte_count];
     pbkdf2_hmac::<Sha256>(
         pin.as_bytes(),
         PIN_FINGERPRINT_SALT.as_bytes(),
         PIN_FINGERPRINT_ITERATIONS,
         &mut out,
     );
-    hex_lower(&out)[..PIN_FINGERPRINT_LENGTH].to_string()
+    base32_upper(&out)[..PIN_FINGERPRINT_LENGTH].to_string()
 }
 
 /// Format a PIN fingerprint for display: uppercased and grouped into 4-char blocks
@@ -214,6 +219,29 @@ fn hex_lower(bytes: &[u8]) -> String {
     out
 }
 
+/// Encode bytes as unpadded uppercase base32 (RFC 4648), 5 bits per output char.
+/// Uses the Tor v3 `.onion` alphabet (A–Z, 2–7), which omits 0/1/8/9 so the encoded
+/// value stays unambiguous when read aloud or copied by hand. Mirrors secure-send-web's
+/// `toBase32`.
+fn base32_upper(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 32] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+    let mut value: u32 = 0;
+    let mut bits = 0u32;
+    let mut out = String::with_capacity(bytes.len().div_ceil(5) * 8);
+    for byte in bytes {
+        value = (value << 8) | u32::from(*byte);
+        bits += 8;
+        while bits >= 5 {
+            out.push(ALPHABET[((value >> (bits - 5)) & 31) as usize] as char);
+            bits -= 5;
+        }
+    }
+    if bits > 0 {
+        out.push(ALPHABET[((value << (5 - bits)) & 31) as usize] as char);
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -236,15 +264,15 @@ mod tests {
     fn fingerprint_is_stable_and_formatted() {
         let pin = "ABCDEFGHJKL2";
         let fp = compute_pin_fingerprint(pin);
-        // 8 hex chars, deterministic (no time bucket).
+        // 8 uppercase base32 chars, deterministic (no time bucket).
         assert_eq!(fp.len(), PIN_FINGERPRINT_LENGTH);
         assert_eq!(fp, compute_pin_fingerprint(pin));
-        assert!(fp.chars().all(|c| c.is_ascii_hexdigit()));
+        assert!(fp.chars().all(|c| c.is_ascii_uppercase() || ('2'..='7').contains(&c)));
 
         // Parity with secure-send-web's computePinFingerprint (verified against
-        // PBKDF2-SHA256 in both Python and the browser Web Crypto API).
-        assert_eq!(fp, "5a98fa8a");
-        assert_eq!(format_pin_fingerprint(&fp), "5A98-FA8A");
+        // PBKDF2-SHA256 base32 in both Python and the browser Web Crypto API).
+        assert_eq!(fp, "LKMPVCX2");
+        assert_eq!(format_pin_fingerprint(&fp), "LKMP-VCX2");
         assert_ne!(compute_pin_fingerprint(pin), compute_pin_fingerprint("MNPQRSTUVWX3"));
     }
 
