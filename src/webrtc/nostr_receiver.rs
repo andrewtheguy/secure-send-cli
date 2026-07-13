@@ -22,7 +22,7 @@ use crate::signaling::nostr::{
 };
 use crate::transfer::run_receiver;
 use crate::ui;
-use crate::util::{format_bytes, resolve_destination};
+use crate::util::{OnConflict, resolve_destination};
 use crate::webrtc::common::{DcMessenger, WebRtcPeer, open_and_detach};
 use crate::webrtc::{add_ice_candidate_safely, advertise_max_message_size, candidate_strings};
 
@@ -30,7 +30,11 @@ const CONNECTION_TIMEOUT: Duration = Duration::from_secs(30);
 const ICE_GATHER_TIMEOUT: Duration = Duration::from_secs(5);
 const ANSWER_RETRY_INTERVAL: Duration = Duration::from_secs(5);
 
-pub async fn receive_file_nostr(pin: &str, output_dir: Option<PathBuf>) -> Result<()> {
+pub async fn receive_file_nostr(
+    pin: &str,
+    output_dir: Option<PathBuf>,
+    on_conflict: OnConflict,
+) -> Result<()> {
     let pin = pin.trim();
     if !is_valid_pin(pin) {
         bail!("Invalid PIN");
@@ -64,13 +68,8 @@ pub async fn receive_file_nostr(pin: &str, output_dir: Option<PathBuf>) -> Resul
         );
     }
 
-    ui::status(&format!(
-        "Incoming file: \"{}\" ({}, {})",
-        file_name,
-        format_bytes(file_size),
-        mime_type
-    ));
-    let Some(dest) = resolve_destination(output_dir, &file_name)? else {
+    ui::incoming(&file_name, file_size, Some(&mime_type));
+    let Some(dest) = resolve_destination(output_dir, &file_name, on_conflict).await? else {
         ui::status("Cancelled.");
         client.disconnect().await;
         return Ok(());

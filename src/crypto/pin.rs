@@ -56,6 +56,11 @@ impl PinKeyLabel {
     }
 }
 
+/// Whether `c` may appear in a PIN (used to filter interactive input).
+pub fn is_pin_char(c: char) -> bool {
+    c.is_ascii() && PIN_CHARSET.contains(&(c as u8))
+}
+
 pub fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)

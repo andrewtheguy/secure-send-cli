@@ -13,7 +13,7 @@ use crate::crypto::ecdh::EcdhKeyPair;
 use crate::signaling::manual::{self, SignalingPayload};
 use crate::transfer::run_receiver;
 use crate::ui;
-use crate::util::{format_bytes, resolve_destination};
+use crate::util::{OnConflict, resolve_destination};
 use crate::webrtc::common::{DcMessenger, WebRtcPeer, open_and_detach};
 use crate::webrtc::{advertise_max_message_size, candidate_init, candidate_strings};
 
@@ -25,7 +25,11 @@ const OPEN_TIMEOUT: Duration = Duration::from_secs(30);
 ///
 /// `offer_code` is the sender's SS03 offer; `output_dir` defaults to the
 /// current directory.
-pub async fn receive_file_manual(offer_code: &str, output_dir: Option<PathBuf>) -> Result<()> {
+pub async fn receive_file_manual(
+    offer_code: &str,
+    output_dir: Option<PathBuf>,
+    on_conflict: OnConflict,
+) -> Result<()> {
     let offer = manual::decode(offer_code)?;
     if offer.payload_type != "offer" {
         bail!("Expected an offer code, but got a response code");
@@ -54,14 +58,10 @@ pub async fn receive_file_manual(offer_code: &str, output_dir: Option<PathBuf>) 
         );
     }
 
-    ui::status(&format!(
-        "Incoming file: \"{}\" ({})",
-        file_name,
-        format_bytes(total_bytes)
-    ));
+    ui::incoming(&file_name, total_bytes, None);
 
     // Resolve the destination up front so no stdin prompt blocks the transfer.
-    let dest = match resolve_destination(output_dir, &file_name)? {
+    let dest = match resolve_destination(output_dir, &file_name, on_conflict).await? {
         Some(path) => path,
         None => {
             ui::status("Cancelled.");

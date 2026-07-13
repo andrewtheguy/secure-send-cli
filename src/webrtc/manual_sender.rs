@@ -1,7 +1,6 @@
 //! Manual-mode sender: create an offer, hand the receiver an SS03 offer code,
 //! consume their answer code, connect, and stream the encrypted file.
 
-use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -9,6 +8,7 @@ use anyhow::{Context, Result, bail};
 use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 
+use crate::archive::SendSource;
 use crate::crypto::chunk::MAX_MESSAGE_SIZE;
 use crate::crypto::ecdh::{EcdhKeyPair, generate_salt};
 use crate::signaling::manual::{self, SignalingPayload};
@@ -22,16 +22,12 @@ const ICE_GATHER_TIMEOUT: Duration = Duration::from_secs(5);
 /// Time allowed for the data channel to open after exchanging codes.
 const CONNECTION_TIMEOUT: Duration = Duration::from_secs(120);
 
-/// Send a single file using manual (copy/paste) signaling.
-pub async fn send_file_manual(path: &Path) -> Result<()> {
-    let metadata = tokio::fs::metadata(path)
-        .await
-        .with_context(|| format!("Cannot read {}", path.display()))?;
-    let file_size = metadata.len();
+/// Send the prepared source using manual (copy/paste) signaling.
+pub async fn send_file_manual(source: &SendSource) -> Result<()> {
+    let file_size = source.file_size;
+    let file_name = source.file_name.clone();
+    let mime_type = source.mime_type.to_string();
 
-    if file_size == 0 {
-        bail!("File is empty: {}", path.display());
-    }
     if file_size > MAX_MESSAGE_SIZE {
         bail!(
             "File is {:.0} MB, which exceeds the {} MB limit",
@@ -39,13 +35,6 @@ pub async fn send_file_manual(path: &Path) -> Result<()> {
             MAX_MESSAGE_SIZE / 1024 / 1024
         );
     }
-
-    let file_name = path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("file")
-        .to_string();
-    let mime_type = "application/octet-stream".to_string();
 
     // Generate our ECDH key pair and per-transfer salt.
     let created_at = manual::now_ms();
@@ -86,7 +75,7 @@ pub async fn send_file_manual(path: &Path) -> Result<()> {
     ui::show_code("SECURE SEND OFFER", &offer_code);
 
     // Read the receiver's answer code.
-    let answer_code = ui::prompt_multiline("Paste the receiver's response code:")?;
+    let answer_code = ui::prompt_code("Paste the receiver's response code:").await?;
     let answer = manual::decode(&answer_code)?;
     if answer.payload_type != "answer" {
         bail!("Expected a response code, but got an offer code");
@@ -120,9 +109,9 @@ pub async fn send_file_manual(path: &Path) -> Result<()> {
     ui::status(&format!("Connected via {}", info.connection_type));
 
     // Stream the file.
-    let mut file = tokio::fs::File::open(path)
+    let mut file = tokio::fs::File::open(&source.path)
         .await
-        .with_context(|| format!("Cannot open {}", path.display()))?;
+        .with_context(|| format!("Cannot open {}", source.path.display()))?;
     let result = run_sender(&mut messenger, &key, &mut file, file_size).await;
 
     let _ = peer.close().await;
