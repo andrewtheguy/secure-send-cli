@@ -87,9 +87,10 @@ secure-send-cli
 
 The wizard covers everything interactively: choose send or receive, pick files
 and/or folders in the built-in browser (Space to multi-select), choose the
-signaling mode, and enter the output directory and PIN when receiving. Nostr
-PIN transfers run inside the TUI with live status and progress; manual SS03
-transfers drop back to the plain terminal for the code swap.
+signaling mode, and when receiving, browse to the output directory (or create
+a new folder with `n`) and enter the PIN. Nostr PIN transfers run inside the
+TUI with live status and progress; manual SS03 transfers drop back to the
+plain terminal for the code swap.
 
 ### Non-Interactive Test Mode
 

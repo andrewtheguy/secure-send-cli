@@ -15,6 +15,7 @@ use crate::crypto::pin::{
     PIN_LENGTH, compute_pin_fingerprint, format_pin_fingerprint, is_pin_char, is_valid_pin,
 };
 
+use super::dir_picker::{DirPicker, DirPickerStep};
 use super::file_browser::{Browser, BrowserStep};
 use super::is_ctrl_c;
 use super::widgets;
@@ -50,8 +51,7 @@ enum Screen {
     },
     OutputDir {
         manual: bool,
-        input: String,
-        error: Option<String>,
+        picker: DirPicker,
     },
     PinEntry {
         output: PathBuf,
@@ -108,11 +108,24 @@ fn handle_key(screen: Screen, key: KeyEvent) -> Step {
         },
         Screen::SendMode { browser, selected } => send_mode_key(browser, selected, key),
         Screen::ReceiveMode { selected } => receive_mode_key(selected, key),
-        Screen::OutputDir {
-            manual,
-            input,
-            error,
-        } => output_dir_key(manual, input, error, key),
+        Screen::OutputDir { manual, mut picker } => match picker.handle_key(key) {
+            DirPickerStep::Stay => Step::Continue(Screen::OutputDir { manual, picker }),
+            DirPickerStep::Back => Step::Continue(Screen::ReceiveMode {
+                selected: usize::from(manual),
+            }),
+            DirPickerStep::Choose(output) => {
+                if manual {
+                    Step::Finish(WizardPlan::ReceiveManual { output })
+                } else {
+                    Step::Continue(Screen::PinEntry {
+                        output,
+                        input: String::new(),
+                        fingerprint: None,
+                        error: None,
+                    })
+                }
+            }
+        },
         Screen::PinEntry {
             output,
             input,
@@ -167,76 +180,16 @@ fn send_mode_key(browser: Browser, selected: usize, key: KeyEvent) -> Step {
 
 fn receive_mode_key(selected: usize, key: KeyEvent) -> Step {
     match key.code {
-        KeyCode::Enter => Step::Continue(Screen::OutputDir {
-            manual: selected == 1,
-            input: default_output_dir(),
-            error: None,
-        }),
+        KeyCode::Enter => match DirPicker::new() {
+            Ok(picker) => Step::Continue(Screen::OutputDir {
+                manual: selected == 1,
+                picker,
+            }),
+            Err(_) => Step::Continue(Screen::ReceiveMode { selected }),
+        },
         KeyCode::Esc => Step::Continue(Screen::MainMenu { selected: 1 }),
         _ => Step::Continue(Screen::ReceiveMode {
             selected: menu_move(selected, MODE_ITEMS.len(), &key),
-        }),
-    }
-}
-
-fn default_output_dir() -> String {
-    std::env::current_dir()
-        .map(|d| d.display().to_string())
-        .unwrap_or_else(|_| ".".to_string())
-}
-
-fn output_dir_key(manual: bool, mut input: String, error: Option<String>, key: KeyEvent) -> Step {
-    match key.code {
-        KeyCode::Enter => {
-            let dir = PathBuf::from(input.trim());
-            if input.trim().is_empty() {
-                return Step::Continue(Screen::OutputDir {
-                    manual,
-                    input,
-                    error: Some("Enter a directory".to_string()),
-                });
-            }
-            if let Err(e) = std::fs::create_dir_all(&dir) {
-                return Step::Continue(Screen::OutputDir {
-                    manual,
-                    input,
-                    error: Some(format!("Cannot create {}: {e}", dir.display())),
-                });
-            }
-            if manual {
-                Step::Finish(WizardPlan::ReceiveManual { output: dir })
-            } else {
-                Step::Continue(Screen::PinEntry {
-                    output: dir,
-                    input: String::new(),
-                    fingerprint: None,
-                    error: None,
-                })
-            }
-        }
-        KeyCode::Esc => Step::Continue(Screen::ReceiveMode {
-            selected: usize::from(manual),
-        }),
-        KeyCode::Backspace => {
-            input.pop();
-            Step::Continue(Screen::OutputDir {
-                manual,
-                input,
-                error: None,
-            })
-        }
-        KeyCode::Char(c) => {
-            input.push(c);
-            Step::Continue(Screen::OutputDir {
-                manual,
-                input,
-                error: None,
-            })
-        }
-        _ => Step::Continue(Screen::OutputDir {
-            manual,
-            input,
-            error,
         }),
     }
 }
@@ -263,8 +216,7 @@ fn pin_entry_key(
         }
         KeyCode::Esc => Step::Continue(Screen::OutputDir {
             manual: false,
-            input: output.display().to_string(),
-            error: None,
+            picker: DirPicker::at(output),
         }),
         KeyCode::Backspace => {
             input.pop();
@@ -359,26 +311,9 @@ fn draw(f: &mut Frame, screen: &mut Screen) {
             widgets::key_hints(f, inner, "↑/↓ move · Enter select · Esc back");
         }
 
-        Screen::OutputDir {
-            input, error, ..
-        } => {
+        Screen::OutputDir { picker, .. } => {
             let inner = widgets::screen_frame(f, "receive");
-            let area = widgets::centered(inner, inner.width.saturating_sub(4).max(40), 4);
-            let [title, line, err] = Layout::vertical([
-                Constraint::Length(2),
-                Constraint::Length(1),
-                Constraint::Length(1),
-            ])
-            .areas(area);
-            f.render_widget(
-                Paragraph::new("Where should the received file be saved?"),
-                title,
-            );
-            widgets::input_line(f, line, "Output directory: ", input);
-            if let Some(error) = error {
-                widgets::error_line(f, err, error);
-            }
-            widgets::key_hints(f, inner, "type to edit · Enter confirm · Esc back");
+            picker.render(f, inner);
         }
 
         Screen::PinEntry {

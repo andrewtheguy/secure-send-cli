@@ -12,6 +12,7 @@
 //! installed for Nostr transfers is never uninstalled.
 
 mod app;
+mod dir_picker;
 mod file_browser;
 mod transfer_screen;
 mod widgets;
