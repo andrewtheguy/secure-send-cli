@@ -201,29 +201,34 @@ fn prompt_file_exists_blocking(path: &Path) -> Result<FileExistsChoice> {
     }
 }
 
-/// Read a potentially multi-line pasted code, terminated by a blank line or EOF.
+/// Read a pasted code, submitted with a single Enter.
 ///
-/// Base64 SS03 codes are single-line, but users may paste with wrapping; we
-/// accumulate lines until a blank line so wrapped pastes still work.
-pub fn prompt_multiline(prompt: &str) -> Result<String> {
-    use std::io::BufRead;
+/// Base64 SS03 codes are single-line, but a paste may carry hard line breaks
+/// (e.g. copied from wrapped text). A multi-line paste lands in the input
+/// buffer all at once, so after the first line we briefly drain whatever else
+/// is already there and join it — one Enter still submits.
+pub async fn prompt_code(prompt: &str) -> Result<String> {
+    use tokio::io::AsyncBufReadExt;
 
     eprintln!("{prompt}");
-    eprintln!("(paste the code, then press Enter on an empty line)");
-    let stdin = std::io::stdin();
-    let mut collected = String::new();
-    for line in stdin.lock().lines() {
-        let line = line?;
-        if line.trim().is_empty() {
-            if collected.trim().is_empty() {
-                continue; // ignore leading blank lines
-            }
-            break;
+    eprintln!("(paste the code and press Enter)");
+    let mut lines = tokio::io::BufReader::new(tokio::io::stdin()).lines();
+
+    let mut collected = loop {
+        let line = lines.next_line().await?.ok_or_else(|| anyhow!("no code entered"))?;
+        let line = line.trim();
+        if !line.is_empty() {
+            break line.to_string();
         }
+        // ignore leading blank lines
+    };
+
+    const PASTE_DRAIN_WINDOW: Duration = Duration::from_millis(80);
+    while let Ok(Ok(Some(line))) =
+        tokio::time::timeout(PASTE_DRAIN_WINDOW, lines.next_line()).await
+    {
         collected.push_str(line.trim());
     }
-    if collected.trim().is_empty() {
-        return Err(anyhow!("no code entered"));
-    }
+
     Ok(collected)
 }

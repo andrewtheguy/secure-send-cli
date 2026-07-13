@@ -75,7 +75,7 @@ pub async fn send_file_manual(source: &SendSource) -> Result<()> {
     ui::show_code("SECURE SEND OFFER", &offer_code);
 
     // Read the receiver's answer code.
-    let answer_code = ui::prompt_multiline("Paste the receiver's response code:")?;
+    let answer_code = ui::prompt_code("Paste the receiver's response code:").await?;
     let answer = manual::decode(&answer_code)?;
     if answer.payload_type != "answer" {
         bail!("Expected a response code, but got an offer code");

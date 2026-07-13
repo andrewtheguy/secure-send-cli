@@ -48,7 +48,7 @@ pub async fn run() -> Result<()> {
 
         WizardPlan::ReceiveManual { output } => {
             drop(guard);
-            let code = ui::prompt_multiline("Paste the sender's offer code:")?;
+            let code = ui::prompt_code("Paste the sender's offer code:").await?;
             webrtc::receive_file_manual(code.trim(), Some(output), OnConflict::Prompt).await
         }
     }
