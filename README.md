@@ -1,6 +1,6 @@
 # secure-send-cli
 
-CLI companion for `secure-send-web`.
+CLI companion for [`secure-send-web`](https://github.com/andrewtheguy/secure-send-web).
 
 This project is pre-release software. No backward compatibility or legacy
 protocol support is maintained.
