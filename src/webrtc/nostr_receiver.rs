@@ -21,6 +21,7 @@ use crate::crypto::chunk::MAX_MESSAGE_SIZE;
 use crate::crypto::ecdh::{EcdhKeyPair, NostrSessionKeys};
 use crate::crypto::pin::{
     PIN_HINT_LOOKBACK_BUCKETS, PIN_TTL_MS, PinRoot, is_valid_pin, normalize_pin_input, now_ms,
+    pin_fingerprint,
 };
 use crate::signaling::nostr::{
     CandidatePayload, ClaimPayload, ConfirmPayload, HandshakeType, NostrClient,
@@ -71,6 +72,8 @@ pub async fn receive_file_nostr(
         bail!("Invalid PIN: check for typos and try again");
     }
 
+    let fingerprint = pin_fingerprint(&pin);
+
     // One PBKDF2 stretch per PIN; every lookup hint and handshake key is a
     // cheap HKDF expansion off this root.
     let step = Instant::now();
@@ -88,8 +91,7 @@ pub async fn receive_file_nostr(
     ui::status_timed("Derived PIN lookup keys", step.elapsed());
 
     ui::status(&format!(
-        "PIN fingerprint: {} (should match the sender's)",
-        root.fingerprint()
+        "PIN fingerprint: {fingerprint} (should match the sender's)"
     ));
 
     let step = Instant::now();

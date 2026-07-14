@@ -19,6 +19,9 @@ pub struct DirPicker {
     show_hidden: bool,
     /// `Some` while the user is typing a new folder name.
     new_name: Option<String>,
+    /// Insertion point in `new_name` (byte offset, always on a char
+    /// boundary): standard line editing.
+    name_cursor: usize,
     error: Option<String>,
 }
 
@@ -44,6 +47,7 @@ impl DirPicker {
             list_state: ListState::default(),
             show_hidden: false,
             new_name: None,
+            name_cursor: 0,
             error: None,
         };
         picker.refresh();
@@ -100,10 +104,33 @@ impl DirPicker {
                     self.new_name = None;
                     self.error = None;
                 }
-                KeyCode::Backspace => {
-                    name.pop();
+                KeyCode::Left => {
+                    if let Some(c) = name[..self.name_cursor].chars().next_back() {
+                        self.name_cursor -= c.len_utf8();
+                    }
                 }
-                KeyCode::Char(c) => name.push(c),
+                KeyCode::Right => {
+                    if let Some(c) = name[self.name_cursor..].chars().next() {
+                        self.name_cursor += c.len_utf8();
+                    }
+                }
+                KeyCode::Home => self.name_cursor = 0,
+                KeyCode::End => self.name_cursor = name.len(),
+                KeyCode::Backspace => {
+                    if let Some(c) = name[..self.name_cursor].chars().next_back() {
+                        self.name_cursor -= c.len_utf8();
+                        name.remove(self.name_cursor);
+                    }
+                }
+                KeyCode::Delete => {
+                    if self.name_cursor < name.len() {
+                        name.remove(self.name_cursor);
+                    }
+                }
+                KeyCode::Char(c) => {
+                    name.insert(self.name_cursor, c);
+                    self.name_cursor += c.len_utf8();
+                }
                 _ => {}
             }
             return DirPickerStep::Stay;
@@ -128,6 +155,7 @@ impl DirPicker {
             }
             KeyCode::Char('n') => {
                 self.new_name = Some(String::new());
+                self.name_cursor = 0;
                 self.error = None;
             }
             KeyCode::Char('.') => {
@@ -188,7 +216,7 @@ impl DirPicker {
         .areas(footer);
 
         if let Some(name) = &self.new_name {
-            widgets::input_line(f, input_row, "New folder name: ", name);
+            widgets::input_line(f, input_row, "New folder name: ", name, self.name_cursor);
             if let Some(error) = &self.error {
                 widgets::error_line(f, summary_row, error);
             }
