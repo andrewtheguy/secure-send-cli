@@ -10,9 +10,9 @@
 //! The 2-byte big-endian chunk index is also fed to AES-256-GCM as additional
 //! authenticated data (AAD), making each chunk's write position tamper-evident.
 
+use aes_gcm::Aes256Gcm;
 use aes_gcm::aead::generic_array::GenericArray;
 use aes_gcm::aead::{Aead, KeyInit, Payload};
-use aes_gcm::Aes256Gcm;
 use anyhow::{Context, Result, bail};
 
 /// Plaintext chunk size (`ENCRYPTION_CHUNK_SIZE` in secure-send-web).
@@ -25,9 +25,9 @@ pub const TAG_LEN: usize = 16;
 pub const CHUNK_INDEX_SIZE: usize = 2;
 /// Per-chunk wire overhead: index + nonce + tag (`ENCRYPTED_CHUNK_OVERHEAD` = 30).
 pub const OVERHEAD_PER_CHUNK: usize = CHUNK_INDEX_SIZE + NONCE_LEN + TAG_LEN;
-/// Maximum transfer size (`MAX_MESSAGE_SIZE` = 2 GiB). Both sides stream
-/// chunk by chunk (the CLI to/from disk), so the bound comes from the wire
-/// protocol's 2-byte chunk-index range, not RAM.
+/// Maximum transferred payload size (`MAX_MESSAGE_SIZE` = 2 GiB). Both sides
+/// stream chunk by chunk, so this is an application bound rather than a RAM
+/// bound; generated ZIPs enforce it against their actual output while sending.
 pub const MAX_MESSAGE_SIZE: u64 = 2 * 1024 * 1024 * 1024;
 
 /// Fill `buf` with cryptographically secure random bytes from the OS.
@@ -107,7 +107,10 @@ mod tests {
         let plaintext = b"the quick brown fox jumps over the lazy dog";
         let msg = encrypt_chunk(&key, plaintext, 3).unwrap();
         // wire layout: index(2) + nonce(12) + ct + tag(16)
-        assert_eq!(msg.len(), CHUNK_INDEX_SIZE + NONCE_LEN + plaintext.len() + TAG_LEN);
+        assert_eq!(
+            msg.len(),
+            CHUNK_INDEX_SIZE + NONCE_LEN + plaintext.len() + TAG_LEN
+        );
         let (idx, enc) = parse_chunk_message(&msg).unwrap();
         assert_eq!(idx, 3);
         let out = decrypt_chunk(&key, enc, idx).unwrap();

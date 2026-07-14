@@ -13,7 +13,6 @@ use anyhow::{Context, Result, bail};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use nostr_sdk::prelude::*;
-use tokio::fs::File;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 
 use crate::archive::SendSource;
@@ -27,9 +26,8 @@ use crate::crypto::pin::{
 use crate::signaling::nostr::{
     self, CandidatePayload, ClaimPayload, ConfirmPayload, HandshakeType, NostrClient,
     RendezvousPayload, Signal, addressed_filter, addressed_filter_from_author,
-    create_handshake_event, create_rendezvous_event, create_signal_event,
-    generate_handshake_nonce, open_handshake_payload, parse_handshake_event, parse_signal_event,
-    seal_handshake_payload,
+    create_handshake_event, create_rendezvous_event, create_signal_event, generate_handshake_nonce,
+    open_handshake_payload, parse_handshake_event, parse_signal_event, seal_handshake_payload,
 };
 use crate::transfer::run_sender;
 use crate::ui;
@@ -66,11 +64,12 @@ fn decode_ecdh_public_key(b64: &str) -> Option<Vec<u8>> {
 }
 
 pub async fn send_file_nostr(source: &SendSource) -> Result<()> {
-    let file_size = source.file_size;
+    let file_size = source.advertised_size();
+    let file_size_exact = source.size_is_exact();
     let file_name = source.file_name.clone();
     let mime_type = source.mime_type.to_string();
 
-    if file_size > MAX_MESSAGE_SIZE {
+    if file_size > MAX_MESSAGE_SIZE || source.estimated_size > MAX_MESSAGE_SIZE {
         bail!(
             "File is {}, which exceeds the {} limit",
             format_bytes(file_size),
@@ -109,6 +108,7 @@ pub async fn send_file_nostr(source: &SendSource) -> Result<()> {
         ecdh_public_key_b64: &ecdh_public_key_b64,
         file_name: &file_name,
         file_size,
+        file_size_exact,
         mime_type: &mime_type,
     };
 
@@ -262,10 +262,7 @@ pub async fn send_file_nostr(source: &SendSource) -> Result<()> {
     ui::status(&format!("Connected via {}", info.connection_type));
 
     let mut messenger = DcMessenger::new(raw);
-    let mut file = File::open(&source.path)
-        .await
-        .with_context(|| format!("Cannot open {}", source.path.display()))?;
-    let result = run_sender(&mut messenger, &session_keys.content, &mut file, file_size).await;
+    let result = run_sender(&mut messenger, &session_keys.content, source).await;
 
     let _ = peer.close().await;
     client.disconnect().await;
@@ -284,6 +281,7 @@ struct RendezvousContext<'a> {
     ecdh_public_key_b64: &'a str,
     file_name: &'a str,
     file_size: u64,
+    file_size_exact: bool,
     mime_type: &'a str,
 }
 
@@ -310,9 +308,10 @@ impl RendezvousContext<'_> {
             ecdh_public_key: self.ecdh_public_key_b64.to_string(),
             nonce: nonce.clone(),
             relays: Some(nostr::default_relays_vec()),
-            file_name: Some(self.file_name.to_string()),
-            file_size: Some(self.file_size),
-            mime_type: Some(self.mime_type.to_string()),
+            file_name: self.file_name.to_string(),
+            file_size: self.file_size,
+            file_size_exact: self.file_size_exact,
+            mime_type: self.mime_type.to_string(),
         };
         let encrypted = aes::encrypt(&root.rendezvous_key(), &serde_json::to_vec(&payload)?)?;
         let event = create_rendezvous_event(
@@ -432,10 +431,9 @@ fn verify_claim(
     }
 
     for generation in generations {
-        let Ok(payload) = open_handshake_payload::<ClaimPayload>(
-            &generation.auth_key,
-            &handshake.sealed_payload,
-        ) else {
+        let Ok(payload) =
+            open_handshake_payload::<ClaimPayload>(&generation.auth_key, &handshake.sealed_payload)
+        else {
             continue; // Sealed with a different PIN/generation
         };
 

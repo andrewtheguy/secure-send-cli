@@ -59,12 +59,11 @@ pub struct RendezvousPayload {
     pub nonce: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub relays: Option<Vec<String>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub file_name: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub file_size: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub mime_type: Option<String>,
+    pub file_name: String,
+    pub file_size: u64,
+    /// False when `file_size` is an input-size estimate for a streamed ZIP.
+    pub file_size_exact: bool,
+    pub mime_type: String,
 }
 
 /// Claim payload (receiver -> sender), sealed with the PIN-derived auth key.
@@ -288,7 +287,10 @@ pub fn rendezvous_kind() -> Kind {
 }
 
 pub fn default_relays_vec() -> Vec<String> {
-    DEFAULT_RELAYS.iter().map(|relay| (*relay).to_string()).collect()
+    DEFAULT_RELAYS
+        .iter()
+        .map(|relay| (*relay).to_string())
+        .collect()
 }
 
 /// Generate a random handshake nonce (16 bytes, base64). The sender mints one
@@ -322,9 +324,7 @@ pub fn create_rendezvous_event(
         tag("expiration", expiration.to_string())?,
     ];
 
-    client.sign(
-        EventBuilder::new(rendezvous_kind(), STANDARD.encode(encrypted_payload)).tags(tags),
-    )
+    client.sign(EventBuilder::new(rendezvous_kind(), STANDARD.encode(encrypted_payload)).tags(tags))
 }
 
 /// Parse a rendezvous event into `(hint, salt, transfer_id, encrypted_payload)`.
@@ -457,7 +457,10 @@ pub fn parse_signal_event(
 pub fn rendezvous_filter(hints: &[String]) -> Filter {
     Filter::new()
         .kind(rendezvous_kind())
-        .custom_tags(SingleLetterTag::lowercase(Alphabet::H), hints.iter().cloned())
+        .custom_tags(
+            SingleLetterTag::lowercase(Alphabet::H),
+            hints.iter().cloned(),
+        )
         .limit(10)
 }
 
@@ -541,7 +544,10 @@ mod tests {
         let value = serde_json::to_value(signal_filter_from_sender("transfer-id", sender))
             .expect("filter json");
 
-        assert_eq!(value["kinds"], serde_json::json!([EVENT_KIND_DATA_TRANSFER]));
+        assert_eq!(
+            value["kinds"],
+            serde_json::json!([EVENT_KIND_DATA_TRANSFER])
+        );
         assert_eq!(value["#t"], serde_json::json!(["transfer-id"]));
         assert_eq!(value["authors"], serde_json::json!([sender.to_hex()]));
         assert!(value.get("#p").is_none());
@@ -551,9 +557,8 @@ mod tests {
     fn rendezvous_event_round_trips_and_matches_web_shape() {
         let (client, _) = test_client();
         let salt = [9u8; 16];
-        let event =
-            create_rendezvous_event(&client, b"sealed", &salt, "transfer-id", "aabbccdd")
-                .expect("rendezvous event");
+        let event = create_rendezvous_event(&client, b"sealed", &salt, "transfer-id", "aabbccdd")
+            .expect("rendezvous event");
 
         assert_eq!(event.kind.as_u16(), EVENT_KIND_RENDEZVOUS);
         assert_eq!(tag_value(&event, "type"), Some("rendezvous"));
@@ -628,14 +633,16 @@ mod tests {
             ecdh_public_key: "ek".to_string(),
             nonce: "n".to_string(),
             relays: Some(vec!["wss://r".to_string()]),
-            file_name: Some("a.txt".to_string()),
-            file_size: Some(42),
-            mime_type: Some("text/plain".to_string()),
+            file_name: "a.txt".to_string(),
+            file_size: 42,
+            file_size_exact: true,
+            mime_type: "text/plain".to_string(),
         };
         let json = serde_json::to_value(&payload).unwrap();
         assert_eq!(json["type"], "rendezvous");
         assert_eq!(json["contentType"], "file");
         assert_eq!(json["ecdhPublicKey"], "ek");
         assert_eq!(json["fileSize"], 42);
+        assert_eq!(json["fileSizeExact"], true);
     }
 }

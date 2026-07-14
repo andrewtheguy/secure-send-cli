@@ -91,9 +91,10 @@ JSON -> raw DEFLATE -> "mag!" || compressed -> time-bucket XOR
 ```
 
 Manual offer payloads contain SDP, ICE candidate strings, file metadata,
-created-at timestamp, sender P-256 public key, and salt. Manual answer payloads
-contain SDP, ICE candidate strings, created-at timestamp, and receiver P-256
-public key.
+`fileSizeExact` (false for a streamed ZIP whose advertised size is an input
+estimate), created-at timestamp, sender P-256 public key, and salt. Manual
+answer payloads contain SDP, ICE candidate strings, created-at timestamp, and
+receiver P-256 public key.
 
 Both sides derive the AES content key with:
 
@@ -120,10 +121,12 @@ The chunk index is also AES-GCM additional authenticated data.
 After all chunks, the sender sends:
 
 ```text
-DONE:<total_chunks>
+DONE:<total_chunks>:<total_bytes>
 ```
 
-The receiver authenticates and persists the full file, then replies:
+The final byte count authenticates the length of streamed ZIPs, whose output
+size was not known during signaling. The receiver authenticates and persists
+the full file, then replies:
 
 ```text
 ACK
@@ -133,11 +136,18 @@ Active P2P transfers use a 60-second idle/stall window rather than an overall
 wall-clock deadline. The sender applies the window to each chunk hand-off while
 waiting for WebRTC backpressure to clear and sending the message. The receiver
 arms the same window once the data channel is open and resets it for every
-incoming data-channel message, including `DONE:<total_chunks>`.
+incoming data-channel message, including
+`DONE:<total_chunks>:<total_bytes>`.
 
 The maximum transfer size is 2 GiB (`MAX_MESSAGE_SIZE`), matching
-`secure-send-web`; both ends stream chunk by chunk (the CLI to/from disk), so
-the bound comes from the 2-byte chunk-index range, not RAM.
+`secure-send-web`; both ends stream chunk by chunk, so the bound is not RAM.
+For multi-file/folder sends the CLI walks and validates the selection first,
+then starts a store-mode ZIP writer only after the data channel opens. A
+bounded channel applies backpressure between blocking file reads/ZIP output
+and async encryption/WebRTC sends, so no complete archive or temporary ZIP is
+created. The advertised ZIP size is the input byte count as a progress hint;
+the sender enforces the limit against actual output and seals the final length
+in `DONE`.
 
 ## Scope
 

@@ -24,11 +24,11 @@ use crate::crypto::pin::{
     pin_fingerprint,
 };
 use crate::signaling::nostr::{
-    CandidatePayload, ClaimPayload, ConfirmPayload, HandshakeType, NostrClient,
-    RendezvousPayload, Signal, addressed_filter_from_author, create_handshake_event,
-    create_signal_event, generate_handshake_nonce, open_handshake_payload,
-    parse_handshake_event, parse_rendezvous_event, parse_signal_event, rendezvous_filter,
-    seal_handshake_payload, signal_filter_from_sender,
+    CandidatePayload, ClaimPayload, ConfirmPayload, HandshakeType, NostrClient, RendezvousPayload,
+    Signal, addressed_filter_from_author, create_handshake_event, create_signal_event,
+    generate_handshake_nonce, open_handshake_payload, parse_handshake_event,
+    parse_rendezvous_event, parse_signal_event, rendezvous_filter, seal_handshake_payload,
+    signal_filter_from_sender,
 };
 use crate::transfer::run_receiver;
 use crate::ui;
@@ -102,22 +102,12 @@ pub async fn receive_file_nostr(
     ui::status("Searching for sender...");
     let rendezvous = find_rendezvous_event(&client, &hints, &rendezvous_key).await?;
 
-    let file_name = rendezvous
-        .payload
-        .file_name
-        .clone()
-        .unwrap_or_else(|| "unknown".to_string());
-    let file_size = rendezvous
-        .payload
-        .file_size
-        .context("Transfer is missing the file size")?;
-    let mime_type = rendezvous
-        .payload
-        .mime_type
-        .clone()
-        .unwrap_or_else(|| "application/octet-stream".to_string());
+    let file_name = rendezvous.payload.file_name.clone();
+    let file_size = rendezvous.payload.file_size;
+    let file_size_exact = rendezvous.payload.file_size_exact;
+    let mime_type = rendezvous.payload.mime_type.clone();
 
-    if file_size == 0 {
+    if file_size_exact && file_size == 0 {
         bail!("Transfer describes an empty file");
     }
     if file_size > MAX_MESSAGE_SIZE {
@@ -338,7 +328,14 @@ pub async fn receive_file_nostr(
     ui::status(&format!("Connected via {}", info.connection_type));
 
     let mut messenger = DcMessenger::new(raw);
-    let result = run_receiver(&mut messenger, &session_keys.content, &dest, file_size).await;
+    let result = run_receiver(
+        &mut messenger,
+        &session_keys.content,
+        &dest,
+        file_size_exact.then_some(file_size),
+        file_size,
+    )
+    .await;
 
     tokio::time::sleep(Duration::from_millis(200)).await;
     let _ = peer.close().await;
@@ -411,8 +408,7 @@ async fn find_rendezvous_event(
             continue;
         };
 
-        let Some(sender_ecdh_public_key) = decode_ecdh_public_key(&payload.ecdh_public_key)
-        else {
+        let Some(sender_ecdh_public_key) = decode_ecdh_public_key(&payload.ecdh_public_key) else {
             continue;
         };
         if payload.payload_type != "rendezvous"

@@ -54,9 +54,9 @@ pub struct SignalingPayload {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub file_size: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub mime_type: Option<String>,
+    pub file_size_exact: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub total_bytes: Option<u64>,
+    pub mime_type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub salt: Option<Vec<u8>>,
 }
@@ -68,9 +68,9 @@ impl SignalingPayload {
         sdp: String,
         candidates: Vec<String>,
         created_at: u64,
-        total_bytes: u64,
         file_name: String,
         file_size: u64,
+        file_size_exact: bool,
         mime_type: String,
         public_key: [u8; PUBLIC_KEY_LEN],
         salt: [u8; 16],
@@ -83,8 +83,8 @@ impl SignalingPayload {
             public_key: public_key.to_vec(),
             file_name: Some(file_name),
             file_size: Some(file_size),
+            file_size_exact: Some(file_size_exact),
             mime_type: Some(mime_type),
-            total_bytes: Some(total_bytes),
             salt: Some(salt.to_vec()),
         }
     }
@@ -104,15 +104,18 @@ impl SignalingPayload {
             public_key: public_key.to_vec(),
             file_name: None,
             file_size: None,
+            file_size_exact: None,
             mime_type: None,
-            total_bytes: None,
             salt: None,
         }
     }
 
     fn validate(&self) -> Result<()> {
         if self.payload_type != "offer" && self.payload_type != "answer" {
-            bail!("invalid signaling payload: unknown type {:?}", self.payload_type);
+            bail!(
+                "invalid signaling payload: unknown type {:?}",
+                self.payload_type
+            );
         }
         if self.public_key.len() != PUBLIC_KEY_LEN {
             bail!(
@@ -248,9 +251,9 @@ mod tests {
             "v=0\r\no=- 1 1 IN IP4 0.0.0.0\r\n".to_string(),
             vec!["candidate:1 1 udp 1 1.2.3.4 5000 typ host".to_string()],
             now_ms(),
-            42,
             "photo.jpg".to_string(),
             42,
+            true,
             "image/jpeg".to_string(),
             [4u8; PUBLIC_KEY_LEN],
             [9u8; 16],
@@ -266,6 +269,7 @@ mod tests {
         assert_eq!(decoded.sdp, offer.sdp);
         assert_eq!(decoded.candidates, offer.candidates);
         assert_eq!(decoded.file_name.as_deref(), Some("photo.jpg"));
+        assert_eq!(decoded.file_size_exact, Some(true));
         assert_eq!(decoded.salt, Some(vec![9u8; 16]));
         assert_eq!(decoded.public_key.len(), PUBLIC_KEY_LEN);
     }
@@ -280,6 +284,7 @@ mod tests {
         );
         let json = serde_json::to_string(&answer).unwrap();
         assert!(!json.contains("fileName"));
+        assert!(!json.contains("fileSizeExact"));
         assert!(!json.contains("salt"));
         let decoded = decode(&encode(&answer).unwrap()).unwrap();
         assert_eq!(decoded.payload_type, "answer");
