@@ -35,9 +35,8 @@ sha2 = "0.10"
 # Manual SS03 signaling payload compression
 flate2 = "1"
 
-# Multi-file/folder packaging (secure-send-web zips multiple inputs into one archive)
-zip = { version = "8", default-features = false, features = ["deflate-flate2-zlib-rs"] }
-tempfile = "3"
+# Multi-file/folder packaging (streamed directly into the transfer)
+zip = { version = "8", default-features = false }
 # Local-time archive-name timestamps (matches secure-send-web's archiveTimestamp)
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 
@@ -56,6 +55,9 @@ env_logger = "0.11"
 ratatui = "0.30"
 crossterm = { version = "0.29", features = ["event-stream"] }
 futures-util = { version = "0.3", default-features = false }
+
+[dev-dependencies]
+tempfile = "3"
 
 [profile.release]
 strip = true

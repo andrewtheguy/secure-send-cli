@@ -24,11 +24,12 @@ const CONNECTION_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Send the prepared source using manual (copy/paste) signaling.
 pub async fn send_file_manual(source: &SendSource) -> Result<()> {
-    let file_size = source.file_size;
+    let file_size = source.advertised_size();
+    let file_size_exact = source.size_is_exact();
     let file_name = source.file_name.clone();
     let mime_type = source.mime_type.to_string();
 
-    if file_size > MAX_MESSAGE_SIZE {
+    if file_size > MAX_MESSAGE_SIZE || source.estimated_size > MAX_MESSAGE_SIZE {
         bail!(
             "File is {}, which exceeds the {} limit",
             crate::util::format_bytes(file_size),
@@ -60,9 +61,9 @@ pub async fn send_file_manual(source: &SendSource) -> Result<()> {
         advertise_max_message_size(offer.sdp),
         candidate_strings(candidates)?,
         created_at,
-        file_size,
         file_name.clone(),
         file_size,
+        file_size_exact,
         mime_type,
         ecdh.public_key_bytes,
         salt,
@@ -108,11 +109,8 @@ pub async fn send_file_manual(source: &SendSource) -> Result<()> {
     let info = peer.get_connection_info().await;
     ui::status(&format!("Connected via {}", info.connection_type));
 
-    // Stream the file.
-    let mut file = tokio::fs::File::open(&source.path)
-        .await
-        .with_context(|| format!("Cannot open {}", source.path.display()))?;
-    let result = run_sender(&mut messenger, &key, &mut file, file_size).await;
+    // Stream the direct file or generate the ZIP into the transfer on demand.
+    let result = run_sender(&mut messenger, &key, source).await;
 
     let _ = peer.close().await;
     result?;

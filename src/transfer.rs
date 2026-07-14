@@ -1,10 +1,12 @@
 //! Message-oriented file transfer over a WebRTC data channel, matching
-//! secure-send-web's manual-mode choreography:
+//! secure-send-web's transfer choreography:
 //!
-//! - Sender: send each 128 KiB plaintext chunk as an encrypted binary message
-//!   (index 0..N-1), then the text message `DONE:N`, then await the text `ACK`.
-//! - Receiver: validate + decrypt each chunk to its `index * 128KiB` offset,
-//!   and once `DONE:N` confirms the count, reply with `ACK`.
+//! - Sender: consume a lazy source in 128 KiB plaintext chunks, send each as
+//!   an encrypted binary message (index 0..N-1), then send the text message
+//!   `DONE:N:B` with the final chunk and byte counts and await `ACK`.
+//! - Receiver: exact-size files are written by chunk offset; streamed ZIPs
+//!   whose final size was unknown during signaling are validated in reliable
+//!   wire order and appended. `DONE:N:B` seals both forms before `ACK`.
 
 use std::path::Path;
 use std::time::Duration;
@@ -12,10 +14,12 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use bytes::Bytes;
 use tokio::fs::File;
-use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
+use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 
+use crate::archive::SendSource;
 use crate::crypto::chunk::{
-    ENCRYPTION_CHUNK_SIZE, NONCE_LEN, TAG_LEN, decrypt_chunk, encrypt_chunk, parse_chunk_message,
+    ENCRYPTION_CHUNK_SIZE, MAX_MESSAGE_SIZE, NONCE_LEN, TAG_LEN, decrypt_chunk, encrypt_chunk,
+    parse_chunk_message,
 };
 use crate::ui::{self, Direction};
 use crate::webrtc::common::DcMessenger;
@@ -29,7 +33,7 @@ const MAX_BUFFERED: usize = 1024 * 1024;
 /// The chunk index is a 2-byte big-endian field, so valid totals are 0..=65536.
 const MAX_CHUNKS: u64 = 0x10000;
 
-/// Number of 128 KiB chunks needed for `total_bytes` (files are non-empty).
+/// Number of 128 KiB chunks needed for `total_bytes`.
 fn chunk_count(total_bytes: u64) -> u64 {
     total_bytes.div_ceil(ENCRYPTION_CHUNK_SIZE as u64)
 }
@@ -40,44 +44,43 @@ fn plaintext_len(index: u64, total_bytes: u64) -> usize {
     (total_bytes - start).min(ENCRYPTION_CHUNK_SIZE as u64) as usize
 }
 
-/// Read up to `buf.len()` bytes, returning the number read (short only at EOF).
-async fn read_full(file: &mut File, buf: &mut [u8]) -> Result<usize> {
-    let mut filled = 0;
-    while filled < buf.len() {
-        let n = file.read(&mut buf[filled..]).await?;
-        if n == 0 {
-            break;
-        }
-        filled += n;
-    }
-    Ok(filled)
-}
-
-/// Send `file` (of length `total_bytes`) encrypted with `key` over `messenger`.
+/// Consume `source`, encrypt it chunk by chunk, and send it over `messenger`.
+/// ZIP generation begins only when the source is opened here.
 pub async fn run_sender(
     messenger: &mut DcMessenger,
     key: &[u8; 32],
-    file: &mut File,
-    total_bytes: u64,
+    source: &SendSource,
 ) -> Result<()> {
-    let total_chunks = chunk_count(total_bytes);
-    if total_chunks > MAX_CHUNKS {
-        bail!("file too large: {total_chunks} chunks exceeds protocol limit of {MAX_CHUNKS}");
-    }
+    let exact_size = source.file_size;
+    let progress_total = source.advertised_size();
+    let mut stream = source.open().await?;
+    let mut chunks_sent = 0u64;
+    let mut sent = 0u64;
 
-    let mut buf = vec![0u8; ENCRYPTION_CHUNK_SIZE];
-    let mut index: u16 = 0;
-    let mut chunks_sent: u64 = 0;
-    let mut sent: u64 = 0;
-
-    loop {
-        let n = read_full(file, &mut buf).await?;
-        if n == 0 {
-            break;
+    while let Some(chunk) = stream.next_chunk().await? {
+        if chunk.is_empty() || chunk.len() > ENCRYPTION_CHUNK_SIZE {
+            bail!("transfer source produced an invalid chunk size");
+        }
+        if chunks_sent >= MAX_CHUNKS {
+            bail!("generated payload exceeds the transfer chunk-index range");
         }
 
-        let encrypted = encrypt_chunk(key, &buf[..n], index)?;
+        let next_sent = sent
+            .checked_add(chunk.len() as u64)
+            .context("generated payload size exceeds the supported range")?;
+        if next_sent > MAX_MESSAGE_SIZE {
+            bail!("Generated payload exceeds the transfer size limit");
+        }
+        if let Some(expected) = exact_size
+            && next_sent > expected
+        {
+            bail!(
+                "Transfer source size changed: expected {expected} bytes, got more than {expected}"
+            );
+        }
 
+        let index = chunks_sent as u16;
+        let encrypted = encrypt_chunk(key, &chunk, index)?;
         match tokio::time::timeout(
             STALL_TIMEOUT,
             send_binary_with_backpressure(messenger, Bytes::from(encrypted)),
@@ -91,26 +94,23 @@ pub async fn run_sender(
             ),
         }
 
-        sent += n as u64;
+        sent = next_sent;
         chunks_sent += 1;
-        ui::progress(Direction::Send, sent, total_bytes);
-
-        if sent == total_bytes {
-            break;
-        }
-        index = index
-            .checked_add(1)
-            .context("chunk index exceeded protocol range")?;
+        ui::progress(Direction::Send, sent, progress_total);
     }
+
+    if let Some(expected) = exact_size
+        && sent != expected
+    {
+        bail!("Transfer source size changed: expected {expected} bytes, got {sent}");
+    }
+
+    // Replace an estimate with the authenticated final byte count at EOF.
+    ui::progress(Direction::Send, sent, sent);
     ui::progress_end();
-
-    if chunks_sent != total_chunks {
-        bail!(
-            "internal error: sent {chunks_sent} chunks but expected {total_chunks} for {sent} bytes"
-        );
-    }
-
-    messenger.send_text(format!("DONE:{total_chunks}")).await?;
+    messenger
+        .send_text(format!("DONE:{chunks_sent}:{sent}"))
+        .await?;
     ui::status("Waiting for receiver acknowledgment...");
 
     wait_for_ack(messenger).await
@@ -148,16 +148,25 @@ async fn wait_for_ack(messenger: &mut DcMessenger) -> Result<()> {
         .map_err(|_| anyhow::anyhow!("timed out waiting for receiver acknowledgment"))?
 }
 
-/// Receive a file of `total_bytes` into `dest`, decrypting with `key`.
+/// Receive into `dest`, decrypting with `key`.
 ///
-/// Writes to `<dest>.part` and atomically renames on success.
+/// `total_bytes` is `Some` for an exact-size direct file and `None` for a ZIP
+/// generated during transfer. `estimated_bytes` is only a progress hint in
+/// the latter case. Writes go to `<dest>.part` and are atomically renamed on
+/// success.
 pub async fn run_receiver(
     messenger: &mut DcMessenger,
     key: &[u8; 32],
     dest: &Path,
-    total_bytes: u64,
+    total_bytes: Option<u64>,
+    estimated_bytes: u64,
 ) -> Result<()> {
-    let expected_chunks = chunk_count(total_bytes);
+    let expected_chunks = total_bytes.map(chunk_count);
+    if let Some(expected) = expected_chunks
+        && expected > MAX_CHUNKS
+    {
+        bail!("transfer size exceeds the supported chunk-index range");
+    }
 
     let part_path = dest.with_extension(match dest.extension().and_then(|e| e.to_str()) {
         Some(ext) => format!("{ext}.part"),
@@ -166,12 +175,16 @@ pub async fn run_receiver(
     let mut out = File::create(&part_path)
         .await
         .with_context(|| format!("Failed to create {}", part_path.display()))?;
-    out.set_len(total_bytes).await?;
+    if let Some(total_bytes) = total_bytes {
+        out.set_len(total_bytes).await?;
+    }
 
-    let mut received = vec![false; expected_chunks as usize];
-    let mut received_count: u64 = 0;
-    let mut received_bytes: u64 = 0;
-    let mut done_signalled = false;
+    let mut received = expected_chunks.map(|count| vec![false; count as usize]);
+    let mut received_count = 0u64;
+    let mut received_bytes = 0u64;
+    let mut previous_streamed_chunk_len = None;
+    let mut done = None;
+    let progress_total = total_bytes.unwrap_or(estimated_bytes);
 
     let result = async {
         loop {
@@ -186,35 +199,79 @@ pub async fn run_receiver(
 
             if msg.is_string {
                 let text = String::from_utf8_lossy(&msg.data);
-                if let Some(rest) = text.strip_prefix("DONE:") {
-                    let n = parse_done_count(rest)
-                        .with_context(|| format!("invalid DONE message: {text:?}"))?;
-                    if n != expected_chunks {
-                        bail!("sender reported {n} chunks, expected {expected_chunks}");
-                    }
-                    done_signalled = true;
-                    break;
+                let (final_chunks, final_bytes) = parse_done(&text)
+                    .with_context(|| format!("invalid DONE message: {text:?}"))?;
+                if final_chunks != received_count {
+                    bail!(
+                        "sender reported {final_chunks} chunks after {received_count} were received"
+                    );
                 }
-                bail!("unexpected control message: {text:?}");
+                if let Some(expected) = expected_chunks
+                    && final_chunks != expected
+                {
+                    bail!("sender reported {final_chunks} chunks, expected {expected}");
+                }
+                if let Some(expected) = total_bytes
+                    && final_bytes != expected
+                {
+                    bail!("sender reported {final_bytes} bytes, expected {expected}");
+                }
+                if final_bytes != received_bytes {
+                    bail!(
+                        "sender reported {final_bytes} bytes after {received_bytes} were received"
+                    );
+                }
+                done = Some((final_chunks, final_bytes));
+                ui::progress(Direction::Receive, final_bytes, final_bytes);
+                break;
             }
 
             // Binary message: one encrypted chunk.
             let (index, encrypted) = parse_chunk_message(&msg.data)?;
             let index_u64 = index as u64;
-            if index_u64 >= expected_chunks {
-                bail!("chunk index {index} out of range (expected < {expected_chunks})");
-            }
-            if received[index as usize] {
-                bail!("duplicate chunk index {index}");
-            }
+            let expect_plain = if let Some(expected_chunks) = expected_chunks {
+                if index_u64 >= expected_chunks {
+                    bail!("chunk index {index} out of range (expected < {expected_chunks})");
+                }
+                let received = received.as_mut().context("missing exact-size index set")?;
+                if received[index as usize] {
+                    bail!("duplicate chunk index {index}");
+                }
+                plaintext_len(index_u64, total_bytes.context("missing exact transfer size")?)
+            } else {
+                // Unknown-size transfers append, so require the reliable data
+                // channel's default ordering and full chunks before the last.
+                if index_u64 != received_count {
+                    bail!("unexpected streamed chunk index {index}");
+                }
+                if let Some(previous) = previous_streamed_chunk_len
+                    && previous != ENCRYPTION_CHUNK_SIZE
+                {
+                    bail!("only the final streamed chunk may be short");
+                }
+                let length = encrypted
+                    .len()
+                    .checked_sub(NONCE_LEN + TAG_LEN)
+                    .context("streamed chunk is shorter than its encryption overhead")?;
+                if length == 0 || length > ENCRYPTION_CHUNK_SIZE {
+                    bail!("invalid streamed chunk {index} length");
+                }
+                previous_streamed_chunk_len = Some(length);
+                length
+            };
 
-            let expect_plain = plaintext_len(index_u64, total_bytes);
             let expect_encrypted = expect_plain + NONCE_LEN + TAG_LEN;
             if encrypted.len() != expect_encrypted {
                 bail!(
                     "chunk {index}: expected {expect_encrypted} encrypted bytes, got {}",
                     encrypted.len()
                 );
+            }
+            let next_received_bytes = received_bytes
+                .checked_add(expect_plain as u64)
+                .context("transfer size exceeds the supported range")?;
+            if next_received_bytes > MAX_MESSAGE_SIZE {
+                bail!("Transfer exceeds the supported size limit");
             }
 
             let plaintext = decrypt_chunk(key, encrypted, index)?;
@@ -225,14 +282,16 @@ pub async fn run_receiver(
                 );
             }
 
-            let offset = index_u64 * ENCRYPTION_CHUNK_SIZE as u64;
-            out.seek(std::io::SeekFrom::Start(offset)).await?;
+            if total_bytes.is_some() {
+                let offset = index_u64 * ENCRYPTION_CHUNK_SIZE as u64;
+                out.seek(std::io::SeekFrom::Start(offset)).await?;
+                received.as_mut().context("missing exact-size index set")?[index as usize] = true;
+            }
             out.write_all(&plaintext).await?;
 
-            received[index as usize] = true;
             received_count += 1;
-            received_bytes += plaintext.len() as u64;
-            ui::progress(Direction::Receive, received_bytes, total_bytes);
+            received_bytes = next_received_bytes;
+            ui::progress(Direction::Receive, received_bytes, progress_total);
         }
         Ok::<(), anyhow::Error>(())
     }
@@ -245,23 +304,20 @@ pub async fn run_receiver(
         let _ = std::fs::remove_file(&part_path);
     };
 
-    match result {
-        Ok(()) => {}
-        Err(e) => {
-            cleanup();
-            return Err(e);
-        }
+    if let Err(error) = result {
+        cleanup();
+        return Err(error);
     }
 
-    if !done_signalled {
+    let Some((final_chunks, final_bytes)) = done else {
         cleanup();
         bail!("data channel closed before transfer completed");
-    }
-    if received_count != expected_chunks || received_bytes != total_bytes {
+    };
+    if received_count != final_chunks || received_bytes != final_bytes {
         cleanup();
         bail!(
-            "incomplete transfer: got {received_count}/{expected_chunks} chunks, \
-             {received_bytes}/{total_bytes} bytes"
+            "incomplete transfer: got {received_count}/{final_chunks} chunks, \
+             {received_bytes}/{final_bytes} bytes"
         );
     }
 
@@ -278,23 +334,45 @@ pub async fn run_receiver(
     Ok(())
 }
 
-fn parse_done_count(count: &str) -> Result<u64> {
-    if count.is_empty() || !count.bytes().all(|byte| byte.is_ascii_digit()) {
-        bail!("non-numeric chunk count");
+fn parse_done(message: &str) -> Result<(u64, u64)> {
+    let values = message
+        .strip_prefix("DONE:")
+        .context("missing DONE prefix")?;
+    let (chunks, bytes) = values
+        .split_once(':')
+        .context("missing final byte count")?;
+    if chunks.is_empty()
+        || bytes.is_empty()
+        || !chunks.bytes().all(|byte| byte.is_ascii_digit())
+        || !bytes.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        bail!("DONE values must contain digits only");
     }
-    count.parse().context("chunk count out of range")
+    let chunks: u64 = chunks.parse().context("chunk count out of range")?;
+    let bytes: u64 = bytes.parse().context("byte count out of range")?;
+    if chunks > MAX_CHUNKS || bytes > MAX_MESSAGE_SIZE {
+        bail!("DONE values exceed the supported transfer limits");
+    }
+    Ok((chunks, bytes))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::parse_done_count;
+    use super::parse_done;
 
     #[test]
-    fn done_count_accepts_digits_only() {
-        assert_eq!(parse_done_count("0").unwrap(), 0);
-        assert_eq!(parse_done_count("42").unwrap(), 42);
-        assert!(parse_done_count("").is_err());
-        assert!(parse_done_count("42 ").is_err());
-        assert!(parse_done_count("42x").is_err());
+    fn done_accepts_final_chunk_and_byte_counts() {
+        assert_eq!(parse_done("DONE:0:0").unwrap(), (0, 0));
+        assert_eq!(parse_done("DONE:42:123456").unwrap(), (42, 123456));
+    }
+
+    #[test]
+    fn done_rejects_legacy_or_malformed_values() {
+        assert!(parse_done("DONE:42").is_err());
+        assert!(parse_done("DONE:42:1:2").is_err());
+        assert!(parse_done("DONE::42").is_err());
+        assert!(parse_done("DONE:42: 1").is_err());
+        assert!(parse_done("DONE:42x:1").is_err());
+        assert!(parse_done("ACK").is_err());
     }
 }

@@ -3,9 +3,9 @@
 //! This crate re-implements secure-send-web's crypto and wire formats so files
 //! and folders can be transferred between the CLI and the browser app over a
 //! WebRTC data channel. Nostr PIN mode and manual SS03 copy/paste mode are both
-//! supported. Multiple files/folders are bundled into one ZIP, exactly like the
-//! web app. The interactive interface is a full-screen TUI wizard; QR codes and
-//! word-based PIN entry are intentionally not supported.
+//! supported. Multiple files/folders are bundled into one ZIP on the fly,
+//! exactly like the web app. The interactive interface is a full-screen TUI
+//! wizard; QR codes and word-based PIN entry are intentionally not supported.
 
 pub mod archive;
 pub mod crypto;

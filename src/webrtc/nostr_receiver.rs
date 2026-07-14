@@ -102,22 +102,12 @@ pub async fn receive_file_nostr(
     ui::status("Searching for sender...");
     let rendezvous = find_rendezvous_event(&client, &hints, &rendezvous_key).await?;
 
-    let file_name = rendezvous
-        .payload
-        .file_name
-        .clone()
-        .unwrap_or_else(|| "unknown".to_string());
-    let file_size = rendezvous
-        .payload
-        .file_size
-        .context("Transfer is missing the file size")?;
-    let mime_type = rendezvous
-        .payload
-        .mime_type
-        .clone()
-        .unwrap_or_else(|| "application/octet-stream".to_string());
+    let file_name = rendezvous.payload.file_name.clone();
+    let file_size = rendezvous.payload.file_size;
+    let file_size_exact = rendezvous.payload.file_size_exact;
+    let mime_type = rendezvous.payload.mime_type.clone();
 
-    if file_size == 0 {
+    if file_size_exact && file_size == 0 {
         bail!("Transfer describes an empty file");
     }
     if file_size > MAX_MESSAGE_SIZE {
@@ -338,7 +328,14 @@ pub async fn receive_file_nostr(
     ui::status(&format!("Connected via {}", info.connection_type));
 
     let mut messenger = DcMessenger::new(raw);
-    let result = run_receiver(&mut messenger, &session_keys.content, &dest, file_size).await;
+    let result = run_receiver(
+        &mut messenger,
+        &session_keys.content,
+        &dest,
+        file_size_exact.then_some(file_size),
+        file_size,
+    )
+    .await;
 
     tokio::time::sleep(Duration::from_millis(200)).await;
     let _ = peer.close().await;

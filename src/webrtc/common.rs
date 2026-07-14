@@ -428,7 +428,7 @@ pub struct WebRtcConnectionInfo {
 // ============================================================================
 //
 // secure-send-web sends each 128 KiB encrypted chunk as its own binary
-// data-channel message and control signals (DONE:N / ACK) as string messages.
+// data-channel message and control signals (DONE:N:B / ACK) as string messages.
 // The webrtc facade's built-in reader caps messages at 65535 bytes, so we
 // detach the channel (see `open_and_detach`) and run our own read loop with a
 // buffer large enough for a full chunk, preserving message boundaries.
@@ -511,7 +511,7 @@ impl DcMessenger {
         Ok(())
     }
 
-    /// Send a text message (a control signal such as `DONE:N` or `ACK`).
+    /// Send a text message (a control signal such as `DONE:N:B` or `ACK`).
     pub async fn send_text(&self, text: impl Into<String>) -> Result<()> {
         let bytes = Bytes::from(text.into().into_bytes());
         self.raw

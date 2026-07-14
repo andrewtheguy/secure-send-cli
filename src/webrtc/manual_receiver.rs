@@ -38,27 +38,34 @@ pub async fn receive_file_manual(
         bail!("Offer expired. Ask the sender to create a new one.");
     }
 
-    let total_bytes = offer
-        .total_bytes
+    let file_size = offer
+        .file_size
         .context("Offer is missing the transfer size")?;
+    let file_size_exact = offer
+        .file_size_exact
+        .context("Offer is missing the exact-size flag")?;
     let file_name = offer
         .file_name
         .clone()
         .context("Offer is missing the file name")?;
+    let mime_type = offer
+        .mime_type
+        .clone()
+        .context("Offer is missing the MIME type")?;
     let salt = offer.salt.clone().context("Offer is missing the encryption salt")?;
 
-    if total_bytes == 0 {
+    if file_size_exact && file_size == 0 {
         bail!("Offer describes an empty file");
     }
-    if total_bytes > MAX_MESSAGE_SIZE {
+    if file_size > MAX_MESSAGE_SIZE {
         bail!(
             "Transfer is {}, which exceeds the {} limit",
-            crate::util::format_bytes(total_bytes),
+            crate::util::format_bytes(file_size),
             crate::util::format_bytes(MAX_MESSAGE_SIZE)
         );
     }
 
-    ui::incoming(&file_name, total_bytes, None);
+    ui::incoming(&file_name, file_size, Some(&mime_type));
 
     // Resolve the destination up front so no stdin prompt blocks the transfer.
     let dest = match resolve_destination(output_dir, &file_name, on_conflict).await? {
@@ -122,7 +129,14 @@ pub async fn receive_file_manual(
     ui::status(&format!("Connected via {}", info.connection_type));
 
     // Receive the file.
-    let result = run_receiver(&mut messenger, &key, &dest, total_bytes).await;
+    let result = run_receiver(
+        &mut messenger,
+        &key,
+        &dest,
+        file_size_exact.then_some(file_size),
+        file_size,
+    )
+    .await;
 
     // Give the sender a moment to receive the ACK before we tear down.
     tokio::time::sleep(Duration::from_millis(200)).await;

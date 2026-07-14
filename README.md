@@ -19,10 +19,11 @@ file/folder selection, signaling mode, output directory, and PIN entry.
 - Manual SS03 copy/paste signaling, compatible with the web app's manual
   exchange codes. When chosen in the wizard, the TUI exits back to the normal
   terminal so the offer/response codes can be copy/pasted.
-- Multiple files and folders are bundled into a single ZIP before transfer,
-  exactly like the web app (`<folder>_<timestamp>.zip` for one folder,
-  `files_<timestamp>.zip` otherwise). Received ZIPs are saved as-is;
-  extraction is up to you.
+- Multiple files and folders are bundled into a single ZIP on the fly, exactly
+  like the web app (`<folder>_<timestamp>.zip` for one folder,
+  `files_<timestamp>.zip` otherwise). ZIP bytes flow directly into encryption
+  and WebRTC without a complete archive or temporary scratch file. Received
+  ZIPs are saved as-is; extraction is up to you.
 - WebRTC data-channel transfer using the web app's encrypted chunk protocol.
   Transport is direct-only (STUN, no TURN relay): the transfer fails rather
   than route file bytes through a relay server.
@@ -146,11 +147,13 @@ The CLI follows `secure-send-web` as the source of truth:
   30 minutes for a receiver before giving up.
 - Manual signaling uses SS03 payloads.
 - File chunks use AES-256-GCM with the 2-byte chunk index as AAD, followed by
-  `DONE:<count>` and receiver `ACK`.
+  `DONE:<chunkCount>:<byteCount>` and receiver `ACK`.
 
 ## Limits
 
-- Maximum transfer size is 2 GiB (after ZIP bundling), matching `secure-send-web`.
+- Maximum transfer size is 2 GiB, matching `secure-send-web`. For a generated
+  ZIP this applies to the final archive, so a selection whose ZIP crosses the
+  limit fails while it is being generated and sent.
 - Received ZIPs are not auto-extracted, matching the web app.
 - No resume support.
 - No QR support.

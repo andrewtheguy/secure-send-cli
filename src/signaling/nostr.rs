@@ -59,12 +59,11 @@ pub struct RendezvousPayload {
     pub nonce: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub relays: Option<Vec<String>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub file_name: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub file_size: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub mime_type: Option<String>,
+    pub file_name: String,
+    pub file_size: u64,
+    /// False when `file_size` is an input-size estimate for a streamed ZIP.
+    pub file_size_exact: bool,
+    pub mime_type: String,
 }
 
 /// Claim payload (receiver -> sender), sealed with the PIN-derived auth key.
@@ -628,14 +627,16 @@ mod tests {
             ecdh_public_key: "ek".to_string(),
             nonce: "n".to_string(),
             relays: Some(vec!["wss://r".to_string()]),
-            file_name: Some("a.txt".to_string()),
-            file_size: Some(42),
-            mime_type: Some("text/plain".to_string()),
+            file_name: "a.txt".to_string(),
+            file_size: 42,
+            file_size_exact: true,
+            mime_type: "text/plain".to_string(),
         };
         let json = serde_json::to_value(&payload).unwrap();
         assert_eq!(json["type"], "rendezvous");
         assert_eq!(json["contentType"], "file");
         assert_eq!(json["ecdhPublicKey"], "ek");
         assert_eq!(json["fileSize"], 42);
+        assert_eq!(json["fileSizeExact"], true);
     }
 }
