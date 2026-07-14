@@ -401,8 +401,13 @@ impl Write for ChunkWriter {
 mod tests {
     use super::*;
     use std::io::Read;
+    use std::time::Duration;
 
     fn write(dir: &Path, rel: &str, content: &str) -> PathBuf {
+        write_bytes(dir, rel, content.as_bytes())
+    }
+
+    fn write_bytes(dir: &Path, rel: &str, content: &[u8]) -> PathBuf {
         let path = dir.join(rel);
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(&path, content).unwrap();
@@ -525,22 +530,68 @@ mod tests {
     #[tokio::test]
     async fn zip_stream_round_trips_with_forward_slash_stored_entries() {
         let dir = tempfile::tempdir().unwrap();
-        write(dir.path(), "bundle/a.txt", "alpha");
-        write(dir.path(), "bundle/sub/b.txt", "beta");
+        let a_data = vec![b'a'; ENCRYPTION_CHUNK_SIZE * 2 + 17];
+        let b_data = vec![b'b'; ENCRYPTION_CHUNK_SIZE + 29];
+        write_bytes(dir.path(), "bundle/a.bin", &a_data);
+        write_bytes(dir.path(), "bundle/sub/b.bin", &b_data);
         let source = prepare_send_source(&[dir.path().join("bundle")]).unwrap();
         assert_stamped_name(&source.file_name, "bundle");
         assert_eq!(source.mime_type, "application/zip");
         assert_eq!(source.file_size, None);
-        assert_eq!(source.estimated_size, 9);
+        assert_eq!(
+            source.estimated_size,
+            (a_data.len() + b_data.len()) as u64
+        );
+        assert!(source.estimated_size > (ENCRYPTION_CHUNK_SIZE * 3) as u64);
         assert!(!source.size_is_exact());
 
         let mut stream = source.open().await.unwrap();
-        let mut bytes = Vec::new();
-        while let Some(chunk) = stream.next_chunk().await.unwrap() {
-            assert!(!chunk.is_empty());
-            assert!(chunk.len() <= ENCRYPTION_CHUNK_SIZE);
-            bytes.extend_from_slice(&chunk);
+        {
+            let SendStream::Zip { receiver, task } = &stream else {
+                panic!("expected ZIP stream");
+            };
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while receiver.len() < 2 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("ZIP producer did not fill its bounded channel");
+            assert_eq!(receiver.len(), 2);
+            assert_eq!(receiver.capacity(), 0);
+            assert!(!task.as_ref().unwrap().is_finished());
         }
+
+        let first = stream.next_chunk().await.unwrap().unwrap();
+        assert_eq!(first.len(), ENCRYPTION_CHUNK_SIZE);
+        {
+            let SendStream::Zip { receiver, task } = &stream else {
+                panic!("expected ZIP stream");
+            };
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while receiver.len() < 2 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("ZIP producer did not resume after backpressure was released");
+            assert_eq!(receiver.len(), 2);
+            assert_eq!(receiver.capacity(), 0);
+            assert!(!task.as_ref().unwrap().is_finished());
+        }
+
+        let mut chunks = vec![first];
+        while let Some(chunk) = stream.next_chunk().await.unwrap() {
+            chunks.push(chunk);
+        }
+        assert!(chunks.len() > 3);
+        assert!(chunks[..chunks.len() - 1]
+            .iter()
+            .all(|chunk| chunk.len() == ENCRYPTION_CHUNK_SIZE));
+        assert!(!chunks.last().unwrap().is_empty());
+        assert!(chunks.last().unwrap().len() <= ENCRYPTION_CHUNK_SIZE);
+
+        let bytes: Vec<u8> = chunks.into_iter().flatten().collect();
         assert!(bytes.len() > source.estimated_size as usize);
 
         let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
@@ -550,18 +601,42 @@ mod tests {
             let mut entry = archive.by_index(i).unwrap();
             assert!(!entry.is_dir());
             assert_eq!(entry.compression(), CompressionMethod::Stored);
-            let mut content = String::new();
-            entry.read_to_string(&mut content).unwrap();
+            let mut content = Vec::new();
+            entry.read_to_end(&mut content).unwrap();
             seen.push((entry.name().to_string(), content));
         }
         seen.sort();
         assert_eq!(
             seen,
             [
-                ("bundle/a.txt".to_string(), "alpha".to_string()),
-                ("bundle/sub/b.txt".to_string(), "beta".to_string()),
+                ("bundle/a.bin".to_string(), a_data),
+                ("bundle/sub/b.bin".to_string(), b_data),
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn zip_stream_propagates_file_read_failure_and_worker_exits() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = write(dir.path(), "bundle/unreadable.txt", "data");
+        let source = prepare_send_source(&[dir.path().join("bundle")]).unwrap();
+        fs::remove_file(&input).unwrap();
+
+        let mut stream = source.open().await.unwrap();
+        let consumer_error = stream.next_chunk().await.unwrap_err();
+        assert!(consumer_error.to_string().contains("Cannot open"));
+
+        let SendStream::Zip { task, .. } = &mut stream else {
+            panic!("expected ZIP stream");
+        };
+        let task = task.take().expect("missing ZIP producer task");
+        let producer_error = tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .expect("ZIP producer did not terminate")
+            .expect("ZIP producer panicked")
+            .unwrap_err();
+        assert!(producer_error.to_string().contains("Cannot open"));
+        assert!(stream.next_chunk().await.unwrap().is_none());
     }
 
     #[test]

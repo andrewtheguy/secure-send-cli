@@ -305,15 +305,18 @@ pub async fn run_receiver(
     };
 
     if let Err(error) = result {
+        drop(out);
         cleanup();
         return Err(error);
     }
 
     let Some((final_chunks, final_bytes)) = done else {
+        drop(out);
         cleanup();
         bail!("data channel closed before transfer completed");
     };
     if received_count != final_chunks || received_bytes != final_bytes {
+        drop(out);
         cleanup();
         bail!(
             "incomplete transfer: got {received_count}/{final_chunks} chunks, \
