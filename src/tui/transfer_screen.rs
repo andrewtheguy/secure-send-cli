@@ -265,14 +265,17 @@ impl State {
         }
         if let Some(pin) = &self.pin {
             lines.push("Enter this PIN on the receiving side:".bold().into());
-            lines.push(format!("  {pin}").bold().into());
+            // Prominent color: the PIN is the one thing to read off this
+            // screen (the web PIN box is highlighted green too).
+            lines.push(pin.clone().green().bold().into());
             lines.push(self.rotation_line());
             lines.push(self.wait_backstop_line());
         }
         if let Some(fp) = &self.fingerprint {
+            // Dimmed so the hex fingerprint is never mistaken for the PIN.
             lines.push(
                 format!("PIN fingerprint: {fp} (should match the other side)")
-                    .bold()
+                    .dim()
                     .into(),
             );
         }
@@ -297,7 +300,6 @@ impl State {
             .round() as usize;
         let secs = remaining.as_secs();
         Line::from(vec![
-            "  ".into(),
             "█".repeat(filled.min(BAR_WIDTH)).yellow(),
             "░".repeat(BAR_WIDTH.saturating_sub(filled)).dim(),
             format!("  New PIN in {}:{:02}", secs / 60, secs % 60).into(),

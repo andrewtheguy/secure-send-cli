@@ -9,6 +9,7 @@ use futures_util::StreamExt;
 use ratatui::DefaultTerminal;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout};
+use ratatui::style::Stylize;
 use ratatui::widgets::Paragraph;
 
 use crate::crypto::pin::{
@@ -386,10 +387,12 @@ fn draw(f: &mut Frame, screen: &mut Screen) {
             if let Some(error) = error {
                 widgets::error_line(f, extra, error);
             } else if let Some(fp) = fingerprint {
+                // Dimmed so the hex fingerprint is never mistaken for the PIN.
                 f.render_widget(
                     Paragraph::new(format!(
                         "PIN fingerprint: {fp} (should match the sender's)"
-                    )),
+                    ))
+                    .dim(),
                     extra,
                 );
             }
