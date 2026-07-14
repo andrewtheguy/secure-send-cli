@@ -2904,7 +2904,7 @@ dependencies = [
 
 [[package]]
 name = "secure-send-cli"
-version = "0.0.10"
+version = "0.0.11"
 dependencies = [
  "aes-gcm",
  "anyhow",
