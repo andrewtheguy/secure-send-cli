@@ -21,7 +21,7 @@ use crate::crypto::chunk::MAX_MESSAGE_SIZE;
 use crate::crypto::ecdh::{EcdhKeyPair, NostrSessionKeys};
 use crate::crypto::pin::{
     PIN_HINT_LOOKBACK_BUCKETS, PIN_TTL_MS, PinRoot, is_valid_pin, normalize_pin_input, now_ms,
-    pin_fingerprint,
+    pin_bucket, pin_fingerprint,
 };
 use crate::signaling::nostr::{
     CandidatePayload, ClaimPayload, ConfirmPayload, HandshakeType, NostrClient, RendezvousPayload,
@@ -81,10 +81,10 @@ pub async fn receive_file_nostr(
     let root = tokio::task::spawn_blocking(move || PinRoot::derive(&pin))
         .await
         .context("PIN derivation task failed")?;
-    // The published hint is scoped to the rotation bucket the sender published
-    // in; derive every bucket a still-honored PIN can sit in.
+    // Mirror the sender's rule by deriving the current and previous buckets.
+    let current_bucket = pin_bucket(now_ms());
     let hints: Vec<String> = (0..=PIN_HINT_LOOKBACK_BUCKETS)
-        .map(|offset| root.hint(offset))
+        .map(|offset| root.hint_for_bucket(current_bucket.saturating_sub(offset)))
         .collect();
     let rendezvous_key = root.rendezvous_key();
     let auth_key = root.auth_key();

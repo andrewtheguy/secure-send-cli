@@ -26,11 +26,11 @@ PIN-scoped value is an HKDF-SHA256 expansion off it (salt
   human visual check; never published.
 
 **Rotation.** The sender mints and publishes a fresh PIN every 2 minutes
-(`PIN_ROTATION_MS`), honors the 3 most recent generations
-(`PIN_ACTIVE_GENERATIONS`) when verifying claims, and attaches a NIP-40
-expiration of 6 minutes (`PIN_TTL_MS`) to each rendezvous event. The receiver
-derives hints for the current bucket plus 3 look-back buckets and refuses
-rendezvous events older than `PIN_TTL_MS`. The TUI `r` key (and the web app's
+(`PIN_ROTATION_MS`), honors only PINs minted in its current or immediately
+previous bucket, and attaches a NIP-40 expiration at the end of the PIN's
+second bucket. The receiver derives hints for its current and previous buckets
+and refuses rendezvous events older than the 4-minute maximum (`PIN_TTL_MS`).
+The TUI `r` key (and the web app's
 refresh button) mints a fresh PIN immediately, dropping all retained
 generations. The sender keeps rotating for up to 30 minutes — a resource
 backstop, not a security bound — before giving up.
