@@ -3,8 +3,8 @@
 //!
 //! The PIN is 10 Crockford-base32 characters (9 data + 1 checksum), displayed
 //! as `XXXXX-XXXXX`. The sender mints a fresh PIN every [`PIN_ROTATION_MS`]
-//! and honors the [`PIN_ACTIVE_GENERATIONS`] most recent ones, so any single
-//! PIN is valid for at most [`PIN_TTL_MS`].
+//! and honors PINs minted in the current or immediately previous wall-clock
+//! bucket, so any single PIN is valid for roughly 2–4 minutes.
 //!
 //! Every wire-exposed PIN-scoped value is an HKDF derivation off a single
 //! PBKDF2-SHA-256 stretch of the PIN (the "PIN root"), domain-separated by
@@ -43,16 +43,15 @@ pub const PIN_ROTATION_MS: u64 = 120_000;
 /// exposure at [`PIN_TTL_MS`], so waiting longer is not less safe. Mirrors
 /// secure-send-web's `PIN_WAIT_TIMEOUT_MS`.
 pub const PIN_WAIT_TIMEOUT_MS: u64 = 30 * 60 * 1000;
-/// How many recent PIN generations the sender honors when verifying a claim.
-pub const PIN_ACTIVE_GENERATIONS: usize = 3;
-/// Resulting validity of any single PIN: bounds rendezvous-event freshness on
-/// the receiver and is the NIP-40 expiration the sender attaches.
-pub const PIN_TTL_MS: u64 = PIN_ROTATION_MS * PIN_ACTIVE_GENERATIONS as u64;
-/// How many earlier rotation buckets the receiver derives hints for. An event
-/// of age exactly PIN_TTL_MS can sit PIN_ACTIVE_GENERATIONS buckets back, so
-/// the look-back must equal PIN_ACTIVE_GENERATIONS to cover the whole
-/// non-expired window.
-pub const PIN_HINT_LOOKBACK_BUCKETS: u64 = PIN_ACTIVE_GENERATIONS as u64;
+/// How many wall-clock buckets may authenticate a claim: the current bucket
+/// and the immediately previous one.
+pub const PIN_ACTIVE_BUCKETS: u64 = 2;
+/// Maximum possible age of an active PIN. Exact expiry is the end of its
+/// immediately following bucket.
+pub const PIN_TTL_MS: u64 = PIN_ROTATION_MS * PIN_ACTIVE_BUCKETS;
+/// How many earlier rotation buckets the receiver derives hints for. This
+/// mirrors the sender's exact current-or-previous-bucket acceptance rule.
+pub const PIN_HINT_LOOKBACK_BUCKETS: u64 = PIN_ACTIVE_BUCKETS - 1;
 
 const PBKDF2_ITERATIONS: u32 = 600_000;
 /// Domain-separation salt for the PBKDF2 PIN-root derivation (public).
@@ -236,12 +235,6 @@ impl PinRoot {
         hex_lower(&bytes)
     }
 
-    /// The PIN hint for the rotation bucket `bucket_offset` buckets before the
-    /// current one (0 = current bucket).
-    pub fn hint(&self, bucket_offset: u64) -> String {
-        self.hint_for_bucket(current_rotation_bucket().saturating_sub(bucket_offset))
-    }
-
     /// The AES-GCM key that seals the claim/confirm handshake payloads. A
     /// payload that decrypts under this key proves the author knows the PIN.
     pub fn auth_key(&self) -> [u8; AES_KEY_LEN] {
@@ -273,9 +266,15 @@ pub fn pin_fingerprint(pin: &str) -> String {
     hex_lower(&bytes)[..PIN_FINGERPRINT_LENGTH].to_string()
 }
 
-/// The current PIN rotation bucket (`floor(now_ms / PIN_ROTATION_MS)`).
-fn current_rotation_bucket() -> u64 {
-    now_ms() / PIN_ROTATION_MS
+/// The wall-clock PIN bucket at `now_ms`.
+pub fn pin_bucket(now_ms: u64) -> u64 {
+    now_ms / PIN_ROTATION_MS
+}
+
+/// Whether a PIN minted in `bucket` is active at `now_ms`.
+pub fn is_pin_bucket_active(bucket: u64, now_ms: u64) -> bool {
+    let current = pin_bucket(now_ms);
+    bucket == current || bucket.checked_add(1) == Some(current)
 }
 
 fn hex_lower(bytes: &[u8]) -> String {
@@ -360,5 +359,14 @@ mod tests {
         // "secure-send:pin-fingerprint:v2"), verified independently.
         assert_eq!(pin_fingerprint("ABCDE0123Y"), "e3e017a41404");
         assert_ne!(pin_fingerprint("ABCDE0123Y"), pin_fingerprint("ABCDE0124Y"));
+    }
+
+    #[test]
+    fn only_current_and_previous_pin_buckets_are_active() {
+        let now = 10 * PIN_ROTATION_MS + 1;
+        assert!(is_pin_bucket_active(10, now));
+        assert!(is_pin_bucket_active(9, now));
+        assert!(!is_pin_bucket_active(8, now));
+        assert!(!is_pin_bucket_active(11, now));
     }
 }

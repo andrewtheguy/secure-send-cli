@@ -142,9 +142,9 @@ The CLI follows `secure-send-web` as the source of truth:
   key, and the on-screen fingerprint are HKDF expansions off that root. The
   PIN derives no content keys — signaling and content keys come from an
   ephemeral P-256 ECDH exchange authenticated by the claim/confirm handshake.
-- PIN rotation: fresh PIN every 2 minutes, the 3 most recent generations are
-  honored, so any single PIN lives at most 6 minutes. The sender waits up to
-  30 minutes for a receiver before giving up.
+- PIN rotation: fresh PIN every 2 minutes; only PINs minted in the current or
+  immediately previous bucket are honored (roughly 2–4 minutes). The sender
+  waits up to 30 minutes for a receiver before giving up.
 - Manual signaling uses SS03 payloads.
 - File chunks use AES-256-GCM with the 2-byte chunk index as AAD, followed by
   `DONE:<chunkCount>:<byteCount>` and receiver `ACK`.

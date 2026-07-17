@@ -22,7 +22,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::crypto::aes;
 use crate::crypto::chunk::fill_random;
-use crate::crypto::pin::{PIN_TTL_MS, now_sec};
+use crate::crypto::pin::{PIN_ACTIVE_BUCKETS, PIN_ROTATION_MS};
 
 pub const DEFAULT_RELAYS: &[&str] = &[
     "wss://relay.damus.io",
@@ -305,17 +305,17 @@ pub fn generate_handshake_nonce() -> Result<String> {
 
 /// Create a rendezvous event (kind 24243).
 ///
-/// The NIP-40 `expiration` tag is set `PIN_TTL_MS` ahead: a rendezvous event
-/// is only claimable while its PIN generation is still honored by the sender,
-/// so relays are asked to drop it as soon as that window closes.
+/// The NIP-40 `expiration` tag is the end of the PIN's immediately following
+/// bucket, matching the sender's current-or-previous acceptance rule.
 pub fn create_rendezvous_event(
     client: &NostrClient,
     encrypted_payload: &[u8],
     salt: &[u8],
     transfer_id: &str,
     hint: &str,
+    pin_bucket: u64,
 ) -> Result<Event> {
-    let expiration = now_sec() + PIN_TTL_MS / 1000;
+    let expiration = (pin_bucket + PIN_ACTIVE_BUCKETS) * PIN_ROTATION_MS / 1000;
     let tags = vec![
         tag("h", hint)?,
         tag("s", STANDARD.encode(salt))?,
@@ -557,14 +557,24 @@ mod tests {
     fn rendezvous_event_round_trips_and_matches_web_shape() {
         let (client, _) = test_client();
         let salt = [9u8; 16];
-        let event = create_rendezvous_event(&client, b"sealed", &salt, "transfer-id", "aabbccdd")
-            .expect("rendezvous event");
+        let pin_bucket = 123;
+        let event = create_rendezvous_event(
+            &client,
+            b"sealed",
+            &salt,
+            "transfer-id",
+            "aabbccdd",
+            pin_bucket,
+        )
+        .expect("rendezvous event");
 
         assert_eq!(event.kind.as_u16(), EVENT_KIND_RENDEZVOUS);
         assert_eq!(tag_value(&event, "type"), Some("rendezvous"));
         let expiration: u64 = tag_value(&event, "expiration").unwrap().parse().unwrap();
-        let expected = now_sec() + PIN_TTL_MS / 1000;
-        assert!(expiration.abs_diff(expected) <= 2);
+        assert_eq!(
+            expiration,
+            (pin_bucket + PIN_ACTIVE_BUCKETS) * PIN_ROTATION_MS / 1000
+        );
 
         let (hint, parsed_salt, transfer_id, sealed) =
             parse_rendezvous_event(&event).expect("parses");

@@ -20,8 +20,8 @@ use crate::crypto::aes;
 use crate::crypto::chunk::MAX_MESSAGE_SIZE;
 use crate::crypto::ecdh::{EcdhKeyPair, NostrSessionKeys, generate_salt};
 use crate::crypto::pin::{
-    PIN_ACTIVE_GENERATIONS, PIN_ROTATION_MS, PIN_WAIT_TIMEOUT_MS, PinRoot, format_pin,
-    generate_pin, generate_transfer_id, pin_fingerprint,
+    PIN_ROTATION_MS, PIN_WAIT_TIMEOUT_MS, PinRoot, format_pin, generate_pin,
+    generate_transfer_id, is_pin_bucket_active, now_ms, pin_bucket, pin_fingerprint,
 };
 use crate::signaling::nostr::{
     self, CandidatePayload, ClaimPayload, ConfirmPayload, HandshakeType, NostrClient,
@@ -42,12 +42,12 @@ const CONNECTION_TIMEOUT: Duration = Duration::from_secs(30);
 const ICE_GATHER_TIMEOUT: Duration = Duration::from_secs(5);
 const OFFER_RETRY_INTERVAL: Duration = Duration::from_secs(5);
 
-/// One rotation generation of the displayed PIN. The sender retains the
-/// `PIN_ACTIVE_GENERATIONS` most recent so a PIN read just before a rotation
-/// still authenticates the receiver's claim.
+/// One rotation generation of the displayed PIN. Its absolute bucket prevents
+/// retained keys from authenticating outside the current or previous bucket.
 struct PinGeneration {
     auth_key: [u8; aes::AES_KEY_LEN],
     nonce: String,
+    bucket: u64,
 }
 
 /// A verified receiver claim: the transfer is locked to this peer.
@@ -300,6 +300,7 @@ impl RendezvousContext<'_> {
         .context("PIN derivation task failed")?;
 
         let nonce = generate_handshake_nonce()?;
+        let bucket = pin_bucket(now_ms());
         let payload = RendezvousPayload {
             payload_type: "rendezvous".to_string(),
             content_type: "file".to_string(),
@@ -319,7 +320,8 @@ impl RendezvousContext<'_> {
             &encrypted,
             self.salt,
             self.transfer_id,
-            &root.hint(0),
+            &root.hint_for_bucket(bucket),
+            bucket,
         )?;
         self.client.publish(&event).await?;
 
@@ -333,6 +335,7 @@ impl RendezvousContext<'_> {
         Ok(PinGeneration {
             auth_key: root.auth_key(),
             nonce,
+            bucket,
         })
     }
 }
@@ -351,8 +354,8 @@ async fn wait_for_verified_claim(
     let mut notifications = client.notifications();
     let sub_id = client.subscribe(filter).await?;
 
-    // Newest generation first; truncated to PIN_ACTIVE_GENERATIONS.
-    let mut generations: Vec<PinGeneration> = Vec::with_capacity(PIN_ACTIVE_GENERATIONS + 1);
+    // Newest generation first; inactive wall-clock buckets are discarded.
+    let mut generations: Vec<PinGeneration> = Vec::new();
     let mut seen = HashSet::new();
     let refresh = ui::pin_refresh_signal();
 
@@ -367,7 +370,8 @@ async fn wait_for_verified_claim(
 
     fn register(generations: &mut Vec<PinGeneration>, generation: PinGeneration) {
         generations.insert(0, generation);
-        generations.truncate(PIN_ACTIVE_GENERATIONS);
+        let now = now_ms();
+        generations.retain(|candidate| is_pin_bucket_active(candidate.bucket, now));
     }
 
     register(&mut generations, rendezvous.publish_fresh_pin().await?);
@@ -415,10 +419,9 @@ async fn wait_for_verified_claim(
     Ok(claim)
 }
 
-/// Try every retained PIN generation against a claim event; a claim sealed
-/// with a rotated-but-still-honored PIN must not be rejected. Invalid claims
-/// are ignored, never fatal: transfer tags are public, so aborting here would
-/// let anyone deny the transfer.
+/// Try every retained, active PIN generation against a claim event. Invalid
+/// claims are ignored, never fatal: transfer tags are public, so aborting here
+/// would let anyone deny the transfer.
 fn verify_claim(
     event: &Event,
     generations: &[PinGeneration],
@@ -431,6 +434,9 @@ fn verify_claim(
     }
 
     for generation in generations {
+        if !is_pin_bucket_active(generation.bucket, now_ms()) {
+            continue;
+        }
         let Ok(payload) =
             open_handshake_payload::<ClaimPayload>(&generation.auth_key, &handshake.sealed_payload)
         else {
@@ -447,6 +453,7 @@ fn verify_claim(
             || payload.sender_nonce != generation.nonce
             || payload.receiver_nonce.is_empty()
             || payload.sender_ecdh_public_key != sender_ecdh_public_key_b64
+            || !is_pin_bucket_active(generation.bucket, now_ms())
         {
             return None;
         }
