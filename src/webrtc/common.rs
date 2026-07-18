@@ -88,6 +88,19 @@ struct WorkerContext {
     connection_info: Arc<RwLock<WebRtcConnectionInfo>>,
 }
 
+struct InboundDatagram {
+    local_addr: SocketAddr,
+    remote_addr: SocketAddr,
+    message: BytesMut,
+}
+
+struct PeerNetwork {
+    sockets: Vec<Arc<UdpSocket>>,
+    routes: HashMap<SocketAddr, usize>,
+    inbound_rx: mpsc::Receiver<InboundDatagram>,
+    readers: Vec<tokio::task::JoinHandle<()>>,
+}
+
 fn new_channel_parts(
     id: RTCDataChannelId,
     label: String,
@@ -129,53 +142,57 @@ pub struct WebRtcPeer {
 
 impl WebRtcPeer {
     pub async fn new() -> Result<Self> {
-        let bind_ip = discover_local_ip();
-        let socket = UdpSocket::bind(SocketAddr::new(bind_ip, 0))
-            .await
-            .context("Failed to bind WebRTC UDP socket")?;
-        let local_addr = socket.local_addr()?;
+        let sockets = bind_candidate_sockets().await?;
+        let mut routes = HashMap::new();
+        let mut candidates = Vec::new();
+        for (socket_index, socket) in sockets.iter().enumerate() {
+            let local_addr = socket.local_addr()?;
+            routes.insert(local_addr, socket_index);
 
-        let host_candidate = CandidateHostConfig {
-            base_config: CandidateConfig {
-                network: "udp".to_owned(),
-                address: local_addr.ip().to_string(),
-                port: local_addr.port(),
-                component: 1,
-                ..Default::default()
-            },
-            ..Default::default()
-        }
-        .new_candidate_host()
-        .context("Failed to create local ICE candidate")?;
-        let host_candidate = RTCIceCandidate::from(&host_candidate)
-            .to_json()
-            .context("Failed to serialize local ICE candidate")?;
-
-        let mut candidates = vec![host_candidate];
-        for (mapped_addr, stun_server) in gather_server_reflexive_candidates(&socket).await {
-            let candidate = CandidateServerReflexiveConfig {
+            let host_candidate = CandidateHostConfig {
                 base_config: CandidateConfig {
                     network: "udp".to_owned(),
-                    address: mapped_addr.ip().to_string(),
-                    port: mapped_addr.port(),
+                    address: local_addr.ip().to_string(),
+                    port: local_addr.port(),
                     component: 1,
                     ..Default::default()
                 },
-                rel_addr: local_addr.ip().to_string(),
-                rel_port: local_addr.port(),
-                url: Some(format!("stun:{stun_server}")),
+                ..Default::default()
             }
-            .new_candidate_server_reflexive()
-            .context("Failed to create server-reflexive ICE candidate")?;
-            let mut candidate = RTCIceCandidate::from(&candidate)
-                .to_json()
-                .context("Failed to serialize server-reflexive ICE candidate")?;
-            candidate.url = Some(format!("stun:{stun_server}"));
-            if !candidates
-                .iter()
-                .any(|existing| existing.candidate == candidate.candidate)
-            {
-                candidates.push(candidate);
+            .new_candidate_host()
+            .context("Failed to create local ICE candidate")?;
+            candidates.push(
+                RTCIceCandidate::from(&host_candidate)
+                    .to_json()
+                    .context("Failed to serialize local ICE candidate")?,
+            );
+
+            for (mapped_addr, stun_server) in gather_server_reflexive_candidates(socket).await {
+                routes.insert(mapped_addr, socket_index);
+                let candidate = CandidateServerReflexiveConfig {
+                    base_config: CandidateConfig {
+                        network: "udp".to_owned(),
+                        address: mapped_addr.ip().to_string(),
+                        port: mapped_addr.port(),
+                        component: 1,
+                        ..Default::default()
+                    },
+                    rel_addr: local_addr.ip().to_string(),
+                    rel_port: local_addr.port(),
+                    url: Some(format!("stun:{stun_server}")),
+                }
+                .new_candidate_server_reflexive()
+                .context("Failed to create server-reflexive ICE candidate")?;
+                let mut candidate = RTCIceCandidate::from(&candidate)
+                    .to_json()
+                    .context("Failed to serialize server-reflexive ICE candidate")?;
+                candidate.url = Some(format!("stun:{stun_server}"));
+                if !candidates
+                    .iter()
+                    .any(|existing| existing.candidate == candidate.candidate)
+                {
+                    candidates.push(candidate);
+                }
             }
         }
 
@@ -195,13 +212,15 @@ impl WebRtcPeer {
         let (data_channel_tx, data_channel_rx) = mpsc::channel(1);
         let connection_state = Arc::new(RwLock::new(RTCPeerConnectionState::New));
         let ice_connection_state = Arc::new(RwLock::new(RTCIceConnectionState::New));
+        let local_addr = sockets[0].local_addr()?;
         let connection_info = Arc::new(RwLock::new(WebRtcConnectionInfo {
             connection_type: "Unknown".to_owned(),
             local_address: Some(local_addr.to_string()),
             remote_address: None,
         }));
 
-        tokio::spawn(run_peer(peer_connection, socket, command_rx, WorkerContext {
+        let network = start_peer_network(sockets, routes);
+        tokio::spawn(run_peer(peer_connection, network, command_rx, WorkerContext {
             command_tx: command_tx.clone(),
             data_channel_tx,
             connection_state: connection_state.clone(),
@@ -341,23 +360,27 @@ async fn receive_response<T>(
 
 async fn run_peer(
     mut peer: rtc::peer_connection::RTCPeerConnection,
-    socket: UdpSocket,
+    mut network: PeerNetwork,
     mut command_rx: mpsc::Receiver<PeerCommand>,
     context: WorkerContext,
 ) {
-    let local_addr = match socket.local_addr() {
-        Ok(addr) => addr,
-        Err(error) => {
-            log::error!("WebRTC socket has no local address: {error}");
-            return;
-        }
-    };
     let mut channels = HashMap::<RTCDataChannelId, WorkerChannel>::new();
-    let mut buffer = vec![0; DATAGRAM_BUFFER_SIZE];
 
     'event_loop: loop {
         while let Some(transmit) = peer.poll_write() {
-            if let Err(error) = socket
+            let socket_index = network
+                .routes
+                .get(&transmit.transport.local_addr)
+                .copied()
+                .or_else(|| {
+                    network.sockets.iter().position(|socket| {
+                        socket
+                            .local_addr()
+                            .is_ok_and(|addr| addr.is_ipv4() == transmit.transport.peer_addr.is_ipv4())
+                    })
+                })
+                .unwrap_or(0);
+            if let Err(error) = network.sockets[socket_index]
                 .send_to(&transmit.message, transmit.transport.peer_addr)
                 .await
             {
@@ -520,29 +543,30 @@ async fn run_peer(
                     }
                 }
             }
-            result = socket.recv_from(&mut buffer) => {
-                match result {
-                    Ok((size, remote_addr)) => {
+            datagram = network.inbound_rx.recv() => {
+                match datagram {
+                    Some(datagram) => {
                         {
                             let mut info = context.connection_info.write().expect("connection info poisoned");
                             info.connection_type = "Direct (Host)".to_owned();
-                            info.remote_address = Some(remote_addr.to_string());
+                            info.local_address = Some(datagram.local_addr.to_string());
+                            info.remote_address = Some(datagram.remote_addr.to_string());
                         }
                         if let Err(error) = peer.handle_read(TaggedBytesMut {
                             now: Instant::now(),
                             transport: TransportContext {
-                                local_addr,
-                                peer_addr: remote_addr,
+                                local_addr: datagram.local_addr,
+                                peer_addr: datagram.remote_addr,
                                 ecn: None,
                                 transport_protocol: TransportProtocol::UDP,
                             },
-                            message: BytesMut::from(&buffer[..size]),
+                            message: datagram.message,
                         }) {
                             log::debug!("Ignoring invalid WebRTC datagram: {error}");
                         }
                     }
-                    Err(error) => {
-                        log::error!("WebRTC UDP read failed: {error}");
+                    None => {
+                        log::error!("All WebRTC UDP readers stopped");
                         break;
                     }
                 }
@@ -560,6 +584,9 @@ async fn run_peer(
         channel.closed.store(true, Ordering::SeqCst);
         channel.send_ready.notify_waiters();
     }
+    for reader in network.readers {
+        reader.abort();
+    }
 }
 
 fn discover_local_ip() -> IpAddr {
@@ -571,6 +598,90 @@ fn discover_local_ip() -> IpAddr {
         return fallback;
     }
     socket.local_addr().map(|addr| addr.ip()).unwrap_or(fallback)
+}
+
+async fn bind_candidate_sockets() -> Result<Vec<Arc<UdpSocket>>> {
+    let preferred_ip = discover_local_ip();
+    let mut ips = vec![preferred_ip];
+    match if_addrs::get_if_addrs() {
+        Ok(interfaces) => {
+            for interface in interfaces {
+                let ip = interface.ip();
+                if interface.is_loopback()
+                    || interface.is_link_local()
+                    || ip.is_unspecified()
+                    || ip.is_multicast()
+                    || ips.contains(&ip)
+                {
+                    continue;
+                }
+                ips.push(ip);
+            }
+        }
+        Err(error) => log::warn!("Failed to enumerate network interfaces: {error}"),
+    }
+
+    let mut sockets = Vec::new();
+    for ip in ips {
+        match UdpSocket::bind(SocketAddr::new(ip, 0)).await {
+            Ok(socket) => sockets.push(Arc::new(socket)),
+            Err(error) => log::debug!("Skipping unusable WebRTC interface {ip}: {error}"),
+        }
+    }
+    if sockets.is_empty() {
+        sockets.push(Arc::new(
+            UdpSocket::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0))
+                .await
+                .context("Failed to bind any WebRTC UDP socket")?,
+        ));
+    }
+    Ok(sockets)
+}
+
+fn start_peer_network(
+    sockets: Vec<Arc<UdpSocket>>,
+    routes: HashMap<SocketAddr, usize>,
+) -> PeerNetwork {
+    let (inbound_tx, inbound_rx) = mpsc::channel(256);
+    let mut readers = Vec::with_capacity(sockets.len());
+    for socket in &sockets {
+        let socket = socket.clone();
+        let inbound_tx = inbound_tx.clone();
+        readers.push(tokio::spawn(async move {
+            let Ok(local_addr) = socket.local_addr() else {
+                return;
+            };
+            let mut buffer = vec![0; DATAGRAM_BUFFER_SIZE];
+            loop {
+                match socket.recv_from(&mut buffer).await {
+                    Ok((size, remote_addr)) => {
+                        if inbound_tx
+                            .send(InboundDatagram {
+                                local_addr,
+                                remote_addr,
+                                message: BytesMut::from(&buffer[..size]),
+                            })
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                    Err(error) => {
+                        log::warn!("WebRTC UDP read failed on {local_addr}: {error}");
+                        break;
+                    }
+                }
+            }
+        }));
+    }
+    drop(inbound_tx);
+    PeerNetwork {
+        sockets,
+        routes,
+        inbound_rx,
+        readers,
+    }
 }
 
 async fn gather_server_reflexive_candidates(socket: &UdpSocket) -> Vec<(SocketAddr, String)> {
