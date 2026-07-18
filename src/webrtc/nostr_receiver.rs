@@ -14,7 +14,7 @@ use anyhow::{Context, Result, bail};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use nostr_sdk::prelude::*;
-use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
+use rtc::peer_connection::sdp::RTCSessionDescription;
 
 use crate::crypto::aes;
 use crate::crypto::chunk::MAX_MESSAGE_SIZE;

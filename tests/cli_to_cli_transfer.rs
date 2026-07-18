@@ -1,17 +1,8 @@
 //! End-to-end CLI↔CLI transfer over a real (loopback) WebRTC data channel.
 //!
-//! Both peers here use the `webrtc` Rust crate, exactly like two CLIs talking to
-//! each other. This is the configuration that used to stall on a multi-folder
-//! (lazy-ZIP) transfer. Each full encrypted chunk is 131102 bytes (128 KiB
-//! plaintext + 30-byte AES-GCM framing), but stock webrtc-sctp caps its
-//! production pending-queue budget at 128 KiB (131072 bytes). A single message
-//! larger than that budget deadlocks `append_large`: it needs more semaphore
-//! permits than exist, and when the SCTP write loop is idle nothing drains the
-//! queue to release them. It fires intermittently ("after a while") because it
-//! depends on the write loop being idle at the moment the chunk is queued.
-//! CLI↔browser never hits it — usrsctp has no such limit. The fix is a patched
-//! webrtc-sctp fork (see `[patch.crates-io]` in Cargo.toml) that raises the
-//! budget to 1 MiB so any single message fits.
+//! Both peers use the `rtc` sans-I/O stack, exactly like two CLIs talking to
+//! each other. This guards the large-message transfer that the former
+//! `webrtc-sctp` transport could deadlock while queueing.
 //!
 //! The payload is several MiB across two folders, enough to queue many full
 //! chunks against an intermittently-idle write loop. A regression would surface
@@ -27,9 +18,9 @@ use secure_send_cli::archive::{SendSource, prepare_send_source};
 use secure_send_cli::transfer::{run_receiver, run_sender};
 use secure_send_cli::webrtc::common::{DcMessenger, WebRtcPeer, open_and_detach};
 
-use webrtc::ice_transport::ice_candidate::RTCIceCandidateInit;
-use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
-use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
+use rtc::peer_connection::sdp::RTCSessionDescription;
+use rtc::peer_connection::state::RTCPeerConnectionState;
+use rtc::peer_connection::transport::RTCIceCandidateInit;
 
 /// Fixed content key for the test. The transfer's crypto is exercised
 /// end-to-end; the key exchange itself is covered elsewhere.
@@ -89,6 +80,7 @@ fn candidate_init(candidate: &str) -> RTCIceCandidateInit {
         sdp_mid: Some("0".to_string()),
         sdp_mline_index: Some(0),
         username_fragment: None,
+        url: None,
     }
 }
 
@@ -97,7 +89,7 @@ async fn candidate_strings(peer: &mut WebRtcPeer) -> Vec<String> {
     assert!(!candidates.is_empty(), "no ICE candidates gathered");
     candidates
         .iter()
-        .map(|c| c.to_json().unwrap().candidate)
+        .map(|c| c.candidate.clone())
         .collect()
 }
 

@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
+use rtc::peer_connection::sdp::RTCSessionDescription;
 
 use crate::crypto::chunk::MAX_MESSAGE_SIZE;
 use crate::crypto::ecdh::EcdhKeyPair;
