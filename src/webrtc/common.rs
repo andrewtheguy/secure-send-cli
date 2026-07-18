@@ -141,7 +141,8 @@ pub struct WebRtcPeer {
 }
 
 impl WebRtcPeer {
-    pub async fn new() -> Result<Self> {
+    pub async fn new(ice_gather_timeout: Duration) -> Result<Self> {
+        let ice_deadline = Instant::now() + ice_gather_timeout;
         let sockets = bind_candidate_sockets().await?;
         let mut routes = HashMap::new();
         let mut candidates = Vec::new();
@@ -167,7 +168,9 @@ impl WebRtcPeer {
                     .context("Failed to serialize local ICE candidate")?,
             );
 
-            for (mapped_addr, stun_server) in gather_server_reflexive_candidates(socket).await {
+            for (mapped_addr, stun_server) in
+                gather_server_reflexive_candidates(socket, ice_deadline).await
+            {
                 routes.insert(mapped_addr, socket_index);
                 let candidate = CandidateServerReflexiveConfig {
                     base_config: CandidateConfig {
@@ -242,10 +245,7 @@ impl WebRtcPeer {
         self.data_channel_rx.take()
     }
 
-    pub async fn gather_ice_candidates(
-        &mut self,
-        _timeout: Duration,
-    ) -> Result<Vec<RTCIceCandidateInit>> {
+    pub async fn gather_ice_candidates(&mut self) -> Result<Vec<RTCIceCandidateInit>> {
         let public_candidate = self
             .candidates
             .iter()
@@ -684,15 +684,22 @@ fn start_peer_network(
     }
 }
 
-async fn gather_server_reflexive_candidates(socket: &UdpSocket) -> Vec<(SocketAddr, String)> {
+async fn gather_server_reflexive_candidates(
+    socket: &UdpSocket,
+    ice_deadline: Instant,
+) -> Vec<(SocketAddr, String)> {
     let Ok(local_addr) = socket.local_addr() else {
         return Vec::new();
     };
     let local_is_ipv4 = local_addr.is_ipv4();
     let mut candidates = Vec::new();
     for server in STUN_SERVERS {
+        let remaining = ice_deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
         let Ok(Ok(resolved)) = tokio::time::timeout(
-            Duration::from_millis(500),
+            remaining.min(Duration::from_millis(500)),
             tokio::net::lookup_host(*server),
         )
         .await
@@ -719,25 +726,31 @@ async fn gather_server_reflexive_candidates(socket: &UdpSocket) -> Vec<(SocketAd
         }
 
         let mut response = [0u8; 1500];
-        let received = tokio::time::timeout(
-            Duration::from_millis(700),
-            socket.recv_from(&mut response),
-        )
-        .await;
-        let Ok(Ok((length, source))) = received else {
-            continue;
-        };
-        if source != server_addr {
-            continue;
-        }
-        if let Some(mapped_addr) = parse_stun_binding_response(
-            &response[..length],
-            &transaction_id,
-        ) && !candidates
+        let probe_deadline = ice_deadline.min(Instant::now() + Duration::from_millis(700));
+        loop {
+            let remaining = probe_deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            let received = tokio::time::timeout(remaining, socket.recv_from(&mut response)).await;
+            let Ok(Ok((length, source))) = received else {
+                break;
+            };
+            if source != server_addr {
+                continue;
+            }
+            let Some(mapped_addr) =
+                parse_stun_binding_response(&response[..length], &transaction_id)
+            else {
+                continue;
+            };
+            if !candidates
                 .iter()
                 .any(|(existing, _)| *existing == mapped_addr)
-        {
-            candidates.push((mapped_addr, (*server).to_owned()));
+            {
+                candidates.push((mapped_addr, (*server).to_owned()));
+            }
+            break;
         }
     }
     candidates

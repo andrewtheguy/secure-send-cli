@@ -85,7 +85,7 @@ fn candidate_init(candidate: &str) -> RTCIceCandidateInit {
 }
 
 async fn candidate_strings(peer: &mut WebRtcPeer) -> Vec<String> {
-    let candidates = peer.gather_ice_candidates(ICE_GATHER_TIMEOUT).await.unwrap();
+    let candidates = peer.gather_ice_candidates().await.unwrap();
     assert!(!candidates.is_empty(), "no ICE candidates gathered");
     candidates
         .iter()
@@ -97,8 +97,8 @@ async fn candidate_strings(peer: &mut WebRtcPeer) -> Vec<String> {
 /// using vanilla (non-trickle) ICE, and return both ends as `DcMessenger`s. The
 /// peers are returned so their connections stay alive for the transfer.
 async fn connect_pair() -> (Arc<WebRtcPeer>, DcMessenger, Arc<WebRtcPeer>, DcMessenger) {
-    let mut sender = WebRtcPeer::new().await.unwrap();
-    let mut receiver = WebRtcPeer::new().await.unwrap();
+    let mut sender = WebRtcPeer::new(ICE_GATHER_TIMEOUT).await.unwrap();
+    let mut receiver = WebRtcPeer::new(ICE_GATHER_TIMEOUT).await.unwrap();
     let mut incoming_dc = receiver.take_data_channel_rx().unwrap();
 
     // Sender: offer + local candidates.

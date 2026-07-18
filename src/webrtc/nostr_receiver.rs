@@ -212,7 +212,7 @@ pub async fn receive_file_nostr(
     let offer_sdp = offer_sdp.context("missing sender offer")?;
 
     ui::status("Creating P2P answer...");
-    let mut peer = WebRtcPeer::new().await?;
+    let mut peer = WebRtcPeer::new(ICE_GATHER_TIMEOUT).await?;
     let mut data_channel_rx = peer
         .take_data_channel_rx()
         .context("Data channel receiver already taken")?;
@@ -227,7 +227,7 @@ pub async fn receive_file_nostr(
     peer.set_local_description(answer.clone()).await?;
 
     ui::status("Gathering network candidates...");
-    let candidates = peer.gather_ice_candidates(ICE_GATHER_TIMEOUT).await?;
+    let candidates = peer.gather_ice_candidates().await?;
     let answer_sdp = advertise_max_message_size(answer.sdp);
     let candidates = candidate_strings(candidates)?;
 
