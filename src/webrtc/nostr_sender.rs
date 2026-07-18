@@ -13,7 +13,7 @@ use anyhow::{Context, Result, bail};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use nostr_sdk::prelude::*;
-use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
+use rtc::peer_connection::sdp::RTCSessionDescription;
 
 use crate::archive::SendSource;
 use crate::crypto::aes;
@@ -146,14 +146,14 @@ pub async fn send_file_nostr(source: &SendSource) -> Result<()> {
         ecdh.derive_nostr_session_keys(&claim.receiver_ecdh_public_key, &salt)?;
 
     ui::status("Creating P2P connection...");
-    let mut peer = WebRtcPeer::new().await?;
+    let mut peer = WebRtcPeer::new(ICE_GATHER_TIMEOUT).await?;
     let data_channel = peer.create_data_channel("file-transfer").await?;
 
     let offer = peer.create_offer().await?;
     peer.set_local_description(offer.clone()).await?;
 
     ui::status("Gathering network candidates...");
-    let candidates = peer.gather_ice_candidates(ICE_GATHER_TIMEOUT).await?;
+    let candidates = peer.gather_ice_candidates().await?;
     let offer_sdp = advertise_max_message_size(offer.sdp);
     let candidates = candidate_strings(candidates)?;
 

@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
+use rtc::peer_connection::sdp::RTCSessionDescription;
 
 use crate::crypto::chunk::MAX_MESSAGE_SIZE;
 use crate::crypto::ecdh::EcdhKeyPair;
@@ -84,7 +84,7 @@ pub async fn receive_file_manual(
     let key = ecdh.derive_aes_key(&offer.public_key, &salt)?;
 
     // Set up WebRTC and apply the offer.
-    let mut peer = WebRtcPeer::new().await?;
+    let mut peer = WebRtcPeer::new(ICE_GATHER_TIMEOUT).await?;
     let mut data_channel_rx = peer
         .take_data_channel_rx()
         .context("Data channel receiver already taken")?;
@@ -99,7 +99,7 @@ pub async fn receive_file_manual(
     peer.set_local_description(answer.clone()).await?;
 
     ui::status("Gathering network candidates...");
-    let candidates = peer.gather_ice_candidates(ICE_GATHER_TIMEOUT).await?;
+    let candidates = peer.gather_ice_candidates().await?;
     if candidates.is_empty() {
         bail!("No ICE candidates gathered. Check your network connection.");
     }

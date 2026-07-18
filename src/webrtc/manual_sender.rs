@@ -5,8 +5,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
-use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
+use rtc::peer_connection::sdp::RTCSessionDescription;
+use rtc::peer_connection::state::RTCPeerConnectionState;
 
 use crate::archive::SendSource;
 use crate::crypto::chunk::MAX_MESSAGE_SIZE;
@@ -44,14 +44,14 @@ pub async fn send_file_manual(source: &SendSource) -> Result<()> {
 
     // Set up the WebRTC connection and data channel.
     ui::status("Preparing offer...");
-    let mut peer = WebRtcPeer::new().await?;
+    let mut peer = WebRtcPeer::new(ICE_GATHER_TIMEOUT).await?;
     let data_channel = peer.create_data_channel("file-transfer").await?;
 
     let offer = peer.create_offer().await?;
     peer.set_local_description(offer.clone()).await?;
 
     ui::status("Gathering network candidates...");
-    let candidates = peer.gather_ice_candidates(ICE_GATHER_TIMEOUT).await?;
+    let candidates = peer.gather_ice_candidates().await?;
     if candidates.is_empty() {
         bail!("No ICE candidates gathered. Check your network connection.");
     }

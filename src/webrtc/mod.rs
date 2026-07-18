@@ -12,17 +12,14 @@ pub use nostr_receiver::receive_file_nostr;
 pub use nostr_sender::send_file_nostr;
 
 use anyhow::Result;
-use webrtc::ice_transport::ice_candidate::{RTCIceCandidate, RTCIceCandidateInit};
+use rtc::peer_connection::transport::RTCIceCandidateInit;
 
 use crate::webrtc::common::WebRtcPeer;
 
 /// Serialize gathered ICE candidates to their SDP `candidate:` strings - the
 /// only field secure-send-web transmits and reads.
-pub(crate) fn candidate_strings(candidates: Vec<RTCIceCandidate>) -> Result<Vec<String>> {
-    candidates
-        .iter()
-        .map(|c| Ok(c.to_json()?.candidate))
-        .collect()
+pub(crate) fn candidate_strings(candidates: Vec<RTCIceCandidateInit>) -> Result<Vec<String>> {
+    Ok(candidates.into_iter().map(|candidate| candidate.candidate).collect())
 }
 
 /// Rebuild an ICE candidate init from a candidate string. secure-send-web
@@ -34,6 +31,7 @@ pub(crate) fn candidate_init(candidate: &str) -> RTCIceCandidateInit {
         sdp_mid: Some("0".to_string()),
         sdp_mline_index: Some(0),
         username_fragment: None,
+        url: None,
     }
 }
 
